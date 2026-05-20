@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://picsum.photos/seed/tankbattle/800/400" alt="Tank Battle Game" width="600"/>
+  <div style="font-size: 80px; margin-bottom: 20px;">🎮💥</div>
   <h1>🎮 多人坦克大战 / Multiplayer Tank Battle</h1>
   <p>一款基于 WebRTC 的双人联机坦克大战游戏</p>
   <p>A multiplayer tank battle game based on WebRTC</p>
@@ -215,12 +215,13 @@ const LOCAL_SERVER_HOST = "localhost"; // 或你的内网 IP / Or your LAN IP
 ## 📷 游戏截图 / Screenshots
 
 <div align="center">
-  <img src="https://picsum.photos/seed/tankbattle1/800/400" alt="Game Screenshot" width="600"/>
+  <div style="font-size: 60px; margin-bottom: 10px;">🛡️🎯</div>
   <p>图1：双人对战场景 / Fig 1: Dual Player Battle</p>
+  <p><a href="https://tankbattle-kappa.vercel.app/" target="_blank">🌐 立即体验 / Try Now</a></p>
 </div>
 
 <div align="center">
-  <img src="https://picsum.photos/seed/tankbattle2/800/400" alt="Menu Screen" width="600"/>
+  <div style="font-size: 60px; margin-bottom: 10px;">🎮⚙️</div>
   <p>图2：主菜单界面 / Fig 2: Main Menu</p>
 </div>
 
