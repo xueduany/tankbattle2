@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://copilot-cn.bytedance.net/api/ide/v1/text_to_image?prompt=retro%20tank%20battle%20game%20screenshot%20with%20green%20tanks%20on%20battlefield%20pixel%20art%20style&image_size=landscape_16_9" alt="Tank Battle Game" width="600"/>
+  <img src="https://i.imgur.com/7Z8X7Ld.png" alt="Tank Battle Game" width="600"/>
   <h1>🎮 多人坦克大战 / Multiplayer Tank Battle</h1>
   <p>一款基于 WebRTC 的双人联机坦克大战游戏</p>
   <p>A multiplayer tank battle game based on WebRTC</p>
@@ -215,12 +215,12 @@ const LOCAL_SERVER_HOST = "localhost"; // 或你的内网 IP / Or your LAN IP
 ## 📷 游戏截图 / Screenshots
 
 <div align="center">
-  <img src="https://copilot-cn.bytedance.net/api/ide/v1/text_to_image?prompt=3D%20tank%20battle%20game%20with%20yellow%20and%20blue%20tanks%20battlefield%20with%20walls%20and%20rivers%20fog%20of%20war&image_size=landscape_16_9" alt="Game Screenshot" width="600"/>
+  <img src="https://i.imgur.com/9fX7Z8X.png" alt="Game Screenshot" width="600"/>
   <p>图1：双人对战场景 / Fig 1: Dual Player Battle</p>
 </div>
 
 <div align="center">
-  <img src="https://copilot-cn.bytedance.net/api/ide/v1/text_to_image?prompt=tank%20game%20menu%20screen%20retro%20arcade%20style%20green%20yellow%20color%20scheme&image_size=landscape_16_9" alt="Menu Screen" width="600"/>
+  <img src="https://i.imgur.com/8Z7X9fY.png" alt="Menu Screen" width="600"/>
   <p>图2：主菜单界面 / Fig 2: Main Menu</p>
 </div>
 
