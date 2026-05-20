@@ -46,6 +46,10 @@
   - **Classic Style**: Retro pixel art tank design
 - **动态特效**：子弹轨迹、爆炸效果、迷雾渐变
   - **Dynamic Effects**: Bullet trails, explosions, fog transitions
+- **NPC 死亡特效**：倒地动画 + 血迹效果
+  - **NPC Death Effects**: Falling animation + blood splatter
+- **坦克爆炸特效**：死亡时零件飞散和爆炸效果
+  - **Tank Explosion**: Flying debris and explosion effects on death
 
 ### 🔗 网络功能 / Network Features
 - **P2P 联机**：基于 WebRTC 的点对点连接
@@ -62,6 +66,24 @@
   - **Mobile**: Touch controls
 - **响应式设计**：自适应不同屏幕尺寸
   - **Responsive Design**: Adaptive to different screen sizes
+
+### 🎵 音频系统 / Audio System
+- **背景音乐**：经典游戏背景音乐，游戏开始时暂停，游戏结束后恢复播放
+  - **Background Music**: Classic game background music, paused during gameplay, resumed after game ends
+- **NPC 死亡语音**：随机喊叫声（Fuck you! / Help me! / 等等），音量最大
+  - **NPC Death Voices**: Random shouts (Fuck you! / Help me! / etc.), maximum volume
+- **音量控制**：可调节音乐音量
+  - **Volume Control**: Adjustable music volume
+
+### 🎯 游戏机制 / Game Mechanics
+- **路人 NPC**：战场上随机走动的路人，可被碾压或击杀
+  - **Pedestrian NPCs**: Randomly walking civilians on battlefield
+- **敌人位置提示**：超过10秒没看到敌人时小地图显示位置2秒
+  - **Enemy Position Hint**: Shows enemy position for 2 seconds after 10s of no sight
+- **撞击扣血**：坦克撞击也会造成伤害（带冷却）
+  - **Collision Damage**: Tank collision also causes damage (with cooldown)
+- **自爆按钮**：快速自杀查看爆炸特效，爆炸半径250范围内的NPC也会被炸死
+  - **Suicide Button**: Quick suicide to see explosion effects, NPCs within 250 radius will also be killed
 
 ---
 
@@ -122,6 +144,8 @@ Open browser and visit `http://localhost:5173` to start the game!
   - **Direction Pad**: Tap to move
 - **开火按钮**：点击右下角按钮发射子弹
   - **Fire Button**: Tap to shoot
+- **自爆按钮**：点击粉色按钮立即自杀（查看特效）
+  - **Suicide Button**: Tap pink button to suicide (see effects)
 - **音量控制**：点击喇叭图标开关音乐
   - **Volume Control**: Tap speaker icon to toggle music
 
@@ -214,14 +238,38 @@ const LOCAL_SERVER_HOST = "localhost"; // 或你的内网 IP / Or your LAN IP
 ## 📷 游戏截图 / Screenshots
 
 <div align="center">
-  <img src="./public/screenshots/screenshoot-game.png" alt="Game Screenshot" width="600"/>
+  <img src="./public/screenshots/screenshot-game.png" alt="Game Screenshot" width="600"/>
   <p>图1：双人对战场景 / Fig 1: Dual Player Battle</p>
 </div>
 
 <div align="center">
-  <img src="./public/screenshots/screenshoot-main.png" alt="Menu Screen" width="600"/>
+  <img src="./public/screenshots/screenshot-main.png" alt="Menu Screen" width="600"/>
   <p>图2：主菜单界面 / Fig 2: Main Menu</p>
 </div>
+
+---
+
+## 📋 更新日志 / Changelog
+
+### 最新更新 / Latest Updates
+- **背景音乐控制**：游戏开始时暂停，游戏结束后恢复播放
+  - **Background Music Control**: Paused during gameplay, resumed after game ends
+- **NPC 系统**：添加了随机走动的路人 NPC，可被坦克碾压或子弹击杀
+  - **NPC System**: Added randomly walking civilians that can be run over or shot
+- **死亡特效**：坦克爆炸时零件飞散，NPC 倒地留血迹
+  - **Death Effects**: Tank explosions with flying debris, NPCs fall with blood splatter
+- **语音效果**：NPC 死亡时随机发出喊叫声（Fuck you! / Help me! / 等等），音量最大
+  - **Voice Effects**: NPCs make random shouts when killed (Fuck you! / Help me! / etc.), maximum volume
+- **敌人提示**：超过10秒没看到敌人时，小地图显示位置2秒
+  - **Enemy Hint**: Shows enemy position for 2 seconds on minimap after 10s of no sight
+- **河流优化**：减少河流数量从5条到2条，更合理的地图布局
+  - **River Optimization**: Reduced rivers from 5 to 2 for better map layout
+- **撞击伤害**：坦克撞击造成伤害（带冷却机制）
+  - **Collision Damage**: Tank collision causes damage (with cooldown)
+- **自爆按钮**：添加快速自杀功能，爆炸半径250范围内的NPC也会被炸死
+  - **Suicide Button**: Quick suicide function, NPCs within 250 radius will also be killed
+- **地图刷新**：地图刷新时 NPC 也重新生成
+  - **Map Refresh**: NPCs respawn when map refreshes
 
 ---
 

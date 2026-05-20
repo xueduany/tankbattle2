@@ -61,6 +61,7 @@ type PlayerInput = {
   left: boolean;
   right: boolean;
   fire: boolean;
+  suicide: boolean; // 自爆
 };
 
 type Tank = {
@@ -70,10 +71,12 @@ type Tank = {
   angle: number;
   hp: number;
   cooldown: number;
+  crashCooldown: number;
   score: number;
   color: string;
   alive: boolean;
   respawn: number;
+  deathTime: number; // 记录死亡时间（帧）
 };
 
 type Bullet = {
@@ -93,16 +96,52 @@ type Explosion = {
   t: number;
 };
 
+type Debris = {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  rot: number;
+  rotSpeed: number;
+  color: number;
+  t: number;
+  size: number;
+};
+
+type Pedestrian = {
+  id: string;
+  x: number;
+  y: number;
+  angle: number; // 行走方向
+  speed: number;
+  color: number;
+  alive: boolean;
+  changeDirectionTimer: number; // 改变方向的计时器
+  deathTimer: number; // 倒地后的计时
+  bloodX: number; // 血迹位置
+  bloodY: number;
+  deathAngle: number; // 死亡时的角度（固定）
+  bloodSize: number; // 血迹大小（固定）
+  splatterData: Array<{ size: number; angle: number; dist: number }>; // 溅血数据（固定）
+};
+
 type GameState = {
   phase: Phase;
   frame: number;
   tanks: Record<PlayerId, Tank>;
   bullets: Bullet[];
   explosions: Explosion[];
+  debris: Debris[];
+  pedestrians: Pedestrian[]; // 路人NPC
   winner?: PlayerId;
   mapSeed: number;
   refreshTimer: number;
   explored: Record<PlayerId, boolean[]>;
+  // 追踪最后看到敌人的时间
+  lastSeenEnemy: Record<PlayerId, number>;
+  // 标记是否正在显示提示
+  showingHint: Record<PlayerId, boolean>;
 };
 
 const W = 1920;
@@ -128,22 +167,17 @@ const WALLS = [
 ];
 
 // 河流系统：河流不可通过坦克，但子弹可以穿过
-// 河流之间保持至少 120px 的间距
 const RIVERS = [
   // 上方横向河流
-  { x: 200, y: 280, w: 560, h: 60 },
-  { x: 1160, y: 280, w: 560, h: 60 },
+  { x: 200, y: 400, w: 600, h: 70 },
   // 下方横向河流
-  { x: 200, y: 740, w: 560, h: 60 },
-  { x: 1160, y: 740, w: 560, h: 60 },
-  // 中间纵向河流（连接上下区域）
-  { x: 960 - 35, y: 340, w: 70, h: 400 },
+  { x: 1100, y: 600, w: 600, h: 70 },
 ];
 // 河流检测函数
 function isInRiver(x: number, y: number, r: number) {
   return RIVERS.some(river => hitRectCircle(river, x, y, r));
 }
-const EMPTY_INPUT: PlayerInput = { up: false, down: false, left: false, right: false, fire: false };
+const EMPTY_INPUT: PlayerInput = { up: false, down: false, left: false, right: false, fire: false, suicide: false };
 
 type TankStyleId = "vanguard" | "raptor" | "atlas" | "specter";
 const TANK_STYLES: Record<TankStyleId, { name: string; desc: string; primary: string; secondary: string; body: string; shape: "classic" | "speed" | "heavy" | "stealth" }> = {
@@ -167,6 +201,40 @@ function persistMapSeed(seed: number) {
   window.sessionStorage.setItem(MAP_SEED_STORAGE_KEY, String(seed));
 }
 
+// 使用Web Speech API播放NPC死亡语音
+function playDeathVoice(synth: SpeechSynthesis) {
+  const utterances = [
+    "Fuck you!",
+    "Help me!",
+    "Oh no!",
+    "Aaaah!",
+    "Help!",
+    "Please!",
+    "Ouch!"
+  ];
+  
+  const text = utterances[Math.floor(Math.random() * utterances.length)];
+  const utterance = new SpeechSynthesisUtterance(text);
+  
+  // 使用最简单的设置，不指定语音，让浏览器使用默认
+  utterance.lang = 'en-US';
+  utterance.pitch = 1.0;
+  utterance.rate = 1.0;
+  utterance.volume = 1.0;
+  
+  console.log('🔊 Playing death voice:', text);
+  
+  try {
+    // 先取消之前可能正在播放的语音
+    synth.cancel();
+    // 然后播放新语音
+    synth.speak(utterance);
+    console.log('✅ Voice playback initiated');
+  } catch (e) {
+    console.error('❌ Error playing voice:', e);
+  }
+}
+
 function freshState(): GameState {
   const mapSeed = getInitialMapSeed();
   const walls = generateWalls(mapSeed);
@@ -179,11 +247,15 @@ function freshState(): GameState {
     refreshTimer: MAP_REFRESH_TICKS,
     bullets: [],
     explosions: [],
+    debris: [],
+    pedestrians: generatePedestrians(walls, mapSeed),
     tanks: {
-      p1: { id: "p1", x: p1.x, y: p1.y, angle: p1.a, hp: 5, cooldown: 0, score: 0, color: "#ffcf33", alive: true, respawn: 0 },
-      p2: { id: "p2", x: p2.x, y: p2.y, angle: p2.a, hp: 5, cooldown: 0, score: 0, color: "#36e0ff", alive: true, respawn: 0 },
+      p1: { id: "p1", x: p1.x, y: p1.y, angle: p1.a, hp: 5, cooldown: 0, crashCooldown: 0, score: 0, color: "#ffcf33", alive: true, respawn: 0, deathTime: 0 },
+      p2: { id: "p2", x: p2.x, y: p2.y, angle: p2.a, hp: 5, cooldown: 0, crashCooldown: 0, score: 0, color: "#36e0ff", alive: true, respawn: 0, deathTime: 0 },
     },
     explored: { p1: Array(FOG_COUNT).fill(false), p2: Array(FOG_COUNT).fill(false) },
+    lastSeenEnemy: { p1: 0, p2: 0 },
+    showingHint: { p1: false, p2: false },
   };
 }
 
@@ -215,20 +287,22 @@ function createSeededRandom(seed: number) {
 function generateWalls(seed: number) {
   const rand = createSeededRandom(seed);
   const walls: { x: number; y: number; w: number; h: number }[] = [];
-  const target = 12 + Math.floor(rand() * 5); // 更多墙壁
-  const riverSpacing = 120; // 墙壁与河流之间的最小间距
-  for (let i = 0; i < 300 && walls.length < target; i += 1) {
+  const target = 8 + Math.floor(rand() * 6); // 减少目标数量，更容易达到
+  const riverSpacing = 60; // 减少与河流的间距，更容易生成
+  for (let i = 0; i < 500 && walls.length < target; i += 1) {
     const horizontal = rand() > 0.5;
-    const w = horizontal ? 220 + rand() * 280 : 84 + rand() * 108; // 墙壁大小翻倍
-    const h = horizontal ? 76 + rand() * 108 : 220 + rand() * 300;
-    const x = 96 + rand() * (W - w - 192);
-    const y = 96 + rand() * (H - h - 192);
+    // 减小墙壁尺寸，更容易生成
+    const w = horizontal ? 120 + rand() * 180 : 60 + rand() * 80;
+    const h = horizontal ? 50 + rand() * 80 : 120 + rand() * 200;
+    const x = 60 + rand() * (W - w - 120);
+    const y = 60 + rand() * (H - h - 120);
     const wall = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
-    const tooCentral = wall.x < W * 0.62 && wall.x + wall.w > W * 0.38 && wall.y < H * 0.62 && wall.y + wall.h > H * 0.38;
-    const overlaps = walls.some((other) => !(wall.x + wall.w + 68 < other.x || other.x + other.w + 68 < wall.x || wall.y + wall.h + 68 < other.y || other.y + other.h + 68 < wall.y));
+    // 放松中心区域稍微放宽一点
+    const tooCentral = wall.x < W * 0.55 && wall.x + wall.w > W * 0.45 && wall.y < H * 0.55 && wall.y + wall.h > H * 0.45;
+    const overlaps = walls.some((other) => !(wall.x + wall.w + 40 < other.x || other.x + other.w + 40 < wall.x || wall.y + wall.h + 40 < other.y || other.y + other.h + 40 < wall.y));
     // 墙壁与河流之间保持至少 riverSpacing 的间距
     const nearRiver = RIVERS.some(river => !(wall.x + wall.w + riverSpacing < river.x || river.x + river.w + riverSpacing < wall.x || wall.y + wall.h + riverSpacing < river.y || river.y + river.h + riverSpacing < wall.y));
-    if (!tooCentral && !overlaps && !nearRiver) walls.push(wall); // 墙壁不能太靠近河流
+    if (!tooCentral && !overlaps && !nearRiver) walls.push(wall);
   }
   return walls;
 }
@@ -243,6 +317,50 @@ function randomSpawn(walls = WALLS, exclude?: { x: number; y: number }) {
   }
   return exclude ? { x: clamp(W - exclude.x, 64, W - 64), y: clamp(H - exclude.y, 64, H - 64), a: Math.random() * Math.PI * 2 } : { x: W / 4, y: H / 4, a: 0 };
 }
+
+// 生成路人NPC
+function generatePedestrians(walls: any[], mapSeed: number): Pedestrian[] {
+  const pedestrians: Pedestrian[] = [];
+  const rand = createSeededRandom(mapSeed);
+  const count = 8 + Math.floor(rand() * 8); // 8-16个路人
+  
+  const pedestrianColors = [0xff69b4, 0x87ceeb, 0x98fb98, 0xffd700, 0xff6347, 0xdda0dd];
+  
+  for (let i = 0; i < count; i++) {
+    // 找到一个安全的生成位置
+    let x, y;
+    let valid = false;
+    for (let j = 0; j < 100 && !valid; j++) {
+      x = 60 + rand() * (W - 120);
+      y = 60 + rand() * (H - 120);
+      // 不能在墙内或河里
+      if (blocked(x, y, 8, walls)) continue;
+      if (isInRiver(x, y, 8)) continue;
+      valid = true;
+    }
+    
+    if (valid) {
+      pedestrians.push({
+        id: `ped-${i}-${mapSeed}`,
+        x: x!,
+        y: y!,
+        angle: rand() * Math.PI * 2,
+        speed: 0.5 + rand() * 0.5,
+        color: pedestrianColors[Math.floor(rand() * pedestrianColors.length)],
+        alive: true,
+        changeDirectionTimer: Math.floor(rand() * 120) + 60, // 1-3秒改变方向
+        deathTimer: 0,
+        bloodX: 0,
+        bloodY: 0,
+        deathAngle: 0,
+        bloodSize: 0,
+        splatterData: [],
+      });
+    }
+  }
+  
+  return pedestrians;
+}
 function refreshBattlefield(state: GameState) {
   const mapSeed = Date.now() + state.frame;
   persistMapSeed(mapSeed);
@@ -255,11 +373,15 @@ function refreshBattlefield(state: GameState) {
     refreshTimer: MAP_REFRESH_TICKS,
     bullets: [],
     explosions: [],
+    debris: [],
+    pedestrians: generatePedestrians(walls, mapSeed),
     explored: { p1: Array(FOG_COUNT).fill(false), p2: Array(FOG_COUNT).fill(false) },
     tanks: {
-      p1: { ...state.tanks.p1, x: p1.x, y: p1.y, angle: p1.a, hp: 5, cooldown: 20, alive: true, respawn: 0 },
-      p2: { ...state.tanks.p2, x: p2.x, y: p2.y, angle: p2.a, hp: 5, cooldown: 20, alive: true, respawn: 0 },
+      p1: { ...state.tanks.p1, x: p1.x, y: p1.y, angle: p1.a, hp: 5, cooldown: 20, alive: true, respawn: 0, deathTime: 0 },
+      p2: { ...state.tanks.p2, x: p2.x, y: p2.y, angle: p2.a, hp: 5, cooldown: 20, alive: true, respawn: 0, deathTime: 0 },
     },
+    lastSeenEnemy: { p1: mapSeed, p2: mapSeed },
+    showingHint: { p1: false, p2: false },
   };
 }
 
@@ -287,6 +409,35 @@ function isCurrentlyVisible(tank: Tank, x: number, y: number) {
   return tank.alive && Math.hypot(tank.x - x, tank.y - y) <= REVEAL_RADIUS;
 }
 
+// 生成坦克爆炸碎片
+function generateDebris(tank: Tank, frame: number): Debris[] {
+  const debris: Debris[] = [];
+  const count = 20 + Math.floor(Math.random() * 15); // 20-35个碎片，更多更明显
+  const colorMap: Record<string, number[]> = {
+    "#ffcf33": [0xffcf33, 0xffa500, 0xff6b4a, 0x8b4513, 0x2f4f4f],
+    "#36e0ff": [0x36e0ff, 0x1e90ff, 0x4169e1, 0x2f4f4f, 0xffcf33]
+  };
+  const colors = colorMap[tank.color] || [0xffcf33, 0xffa500, 0x8b4513, 0x2f4f4f];
+  
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i / count) + (Math.random() - 0.5) * 1.2;
+    const speed = 4 + Math.random() * 8; // 更快的速度
+    debris.push({
+      id: `${tank.id}-${frame}-${i}`,
+      x: tank.x,
+      y: tank.y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      rot: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 0.5, // 更快的旋转
+      color: colors[Math.floor(Math.random() * colors.length)],
+      t: 90 + Math.floor(Math.random() * 60), // 更长的显示时间
+      size: 6 + Math.random() * 12 // 更大的碎片
+    });
+  }
+  return debris;
+}
+
 function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameState {
   if (prev.phase !== "playing") return prev;
   const walls = generateWalls(prev.mapSeed);
@@ -296,9 +447,50 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
     refreshTimer: prev.refreshTimer - 1,
     bullets: prev.bullets.map((b) => ({ ...b })),
     explosions: prev.explosions.map((e) => ({ ...e, t: e.t - 1 })).filter((e) => e.t > 0),
+    debris: prev.debris.map((d) => ({
+      ...d,
+      x: d.x + d.vx,
+      y: d.y + d.vy,
+      vx: d.vx * 0.98,
+      vy: d.vy * 0.98,
+      rot: d.rot + d.rotSpeed,
+      t: d.t - 1
+    })).filter((d) => d.t > 0),
+    pedestrians: prev.pedestrians.map(p => ({ ...p })),
     tanks: { p1: { ...prev.tanks.p1 }, p2: { ...prev.tanks.p2 } },
     explored: { p1: [...prev.explored.p1], p2: [...prev.explored.p2] },
+    lastSeenEnemy: { ...prev.lastSeenEnemy },
+    showingHint: { ...prev.showingHint },
   };
+
+  // 检查是否能看到敌人，更新最后看到的时间
+  (Object.keys(next.tanks) as PlayerId[]).forEach((playerId) => {
+    const enemyId = playerId === "p1" ? "p2" : "p1";
+    const player = next.tanks[playerId];
+    const enemy = next.tanks[enemyId];
+    if (player.alive && enemy.alive) {
+      const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+      const canSeeEnemy = dist <= REVEAL_RADIUS;
+      
+      if (canSeeEnemy) {
+        // 能看到敌人，重置所有状态
+        next.lastSeenEnemy[playerId] = next.frame;
+        next.showingHint[playerId] = false;
+      } else {
+        // 看不到敌人，检查是否需要显示提示或重置
+        const timeSinceSeen = next.frame - next.lastSeenEnemy[playerId];
+        
+        if (timeSinceSeen >= 600 && timeSinceSeen < 720) {
+          // 10-12秒，显示提示
+          next.showingHint[playerId] = true;
+        } else if (timeSinceSeen >= 720 && next.showingHint[playerId]) {
+          // 超过12秒，结束提示并重置为10秒前的状态，开始下一个周期
+          next.lastSeenEnemy[playerId] = next.frame - 600;
+          next.showingHint[playerId] = false;
+        }
+      }
+    }
+  });
 
   (Object.keys(next.tanks) as PlayerId[]).forEach((id) => {
     const t = next.tanks[id];
@@ -308,11 +500,49 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
       if (t.respawn <= 0) {
         const other = next.tanks[id === "p1" ? "p2" : "p1"];
         const spawn = randomSpawn(walls, other.alive ? { x: other.x, y: other.y } : undefined);
-        Object.assign(t, { x: spawn.x, y: spawn.y, angle: spawn.a, hp: 5, alive: true, cooldown: 18 });
+        Object.assign(t, { x: spawn.x, y: spawn.y, angle: spawn.a, hp: 5, alive: true, cooldown: 18, crashCooldown: 0, deathTime: 0 });
       }
       return;
     }
     const input = inputs[id] ?? EMPTY_INPUT;
+    
+    // 自杀逻辑
+    if (input.suicide && t.hp > 0) {
+      t.hp = 0;
+      t.alive = false;
+      t.respawn = RESPAWN_TICKS;
+      t.deathTime = next.frame;
+      next.explosions.push({ id: `suicide-boom-${next.frame}`, x: t.x, y: t.y, t: 34 });
+      next.debris.push(...generateDebris(t, next.frame));
+      
+      // 自爆炸死附近的NPC
+      const explosionRadius = 250; // 爆炸半径（放大5倍）
+      next.pedestrians.forEach(ped => {
+        if (ped.alive) {
+          const dist = Math.hypot(ped.x - t.x, ped.y - t.y);
+          if (dist < explosionRadius) {
+            // NPC被爆炸炸死
+            ped.alive = false;
+            ped.deathTimer = 180;
+            ped.bloodX = ped.x;
+            ped.bloodY = ped.y;
+            ped.deathAngle = ped.angle + (Math.random() * 0.5);
+            ped.bloodSize = 12 + Math.random() * 8;
+            ped.splatterData = [];
+            for (let i = 0; i < 5; i++) {
+              ped.splatterData.push({
+                size: 2 + Math.random() * 4,
+                angle: Math.random() * Math.PI * 2,
+                dist: 6 + Math.random() * 10,
+              });
+            }
+          }
+        }
+      });
+      
+      return;
+    }
+    
     const rot = 0.075;
     const speed = input.down ? -2.0 : 2.6;
     if (input.left) t.angle -= rot;
@@ -324,6 +554,7 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
       if (!blocked(t.x, ny, TANK_R, walls)) t.y = ny;
     }
     t.cooldown = Math.max(0, t.cooldown - 1);
+    t.crashCooldown = Math.max(0, t.crashCooldown - 1);
     if (input.fire && t.cooldown === 0) {
       t.cooldown = 24;
       next.bullets.push({
@@ -337,6 +568,90 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
       });
     }
   });
+
+  // 坦克碰撞检测 - 撞击扣血 + 物理推开
+  const p1 = next.tanks.p1;
+  const p2 = next.tanks.p2;
+  if (p1.alive && p2.alive) {
+    const dx = p1.x - p2.x;
+    const dy = p1.y - p2.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = TANK_R * 2;
+    
+    if (dist < minDist) {
+      // 两个坦克相撞！
+      const p1Input = inputs.p1 ?? EMPTY_INPUT;
+      const p2Input = inputs.p2 ?? EMPTY_INPUT;
+      const p1IsMoving = p1Input.up || p1Input.down || p1Input.left || p1Input.right;
+      const p2IsMoving = p2Input.up || p2Input.down || p2Input.left || p2Input.right;
+      
+      // 物理推开效果（即使不扣血也要推开，避免重叠）
+      const overlap = minDist - dist;
+      const pushForce = overlap * 0.5; // 推开力度
+      const nx = dx / dist;
+      const ny = dy / dist;
+      
+      if (!isNaN(nx) && !isNaN(ny)) {
+        // 尝试推开两个坦克
+        const p1PushX = nx * pushForce;
+        const p1PushY = ny * pushForce;
+        const p2PushX = -nx * pushForce;
+        const p2PushY = -ny * pushForce;
+        
+        // 只有不被墙壁挡住时才可以推开
+        if (!blocked(p1.x + p1PushX, p1.y + p1PushY, TANK_R, walls)) {
+          p1.x += p1PushX;
+          p1.y += p1PushY;
+        }
+        if (!blocked(p2.x + p2PushX, p2.y + p2PushY, TANK_R, walls)) {
+          p2.x += p2PushX;
+          p2.y += p2PushY;
+        }
+      }
+
+      // 只有冷却时间为0时才扣血！
+      if (p1.crashCooldown === 0 && p2.crashCooldown === 0) {
+        // 添加撞击爆炸效果
+        const centerX = (p1.x + p2.x) / 2;
+        const centerY = (p1.y + p2.y) / 2;
+        next.explosions.push({ id: `crash-${next.frame}`, x: centerX, y: centerY, t: 24 });
+
+        if (p1IsMoving && p2IsMoving) {
+          // 双方都在移动，都扣血
+          p1.hp -= 1;
+          p2.hp -= 1;
+        } else if (p1IsMoving) {
+          // 只有P1在移动，只扣P2血
+          p2.hp -= 1;
+        } else if (p2IsMoving) {
+          // 只有P2在移动，只扣P1血
+          p1.hp -= 1;
+        }
+        
+        // 设置撞击冷却时间（30帧 = 0.5秒）
+        p1.crashCooldown = 30;
+        p2.crashCooldown = 30;
+        
+        // 检查死亡
+        [p1, p2].forEach(t => {
+          if (t.hp <= 0) {
+            t.alive = false;
+            t.respawn = RESPAWN_TICKS;
+            t.deathTime = next.frame; // 记录死亡时间
+            const other = t.id === "p1" ? p2 : p1;
+            other.score += 1;
+            next.explosions.push({ id: `boom-${next.frame}`, x: t.x, y: t.y, t: 34 });
+            // 生成爆炸碎片
+            next.debris.push(...generateDebris(t, next.frame));
+            if (other.score >= 5) {
+              next.phase = "ended";
+              next.winner = other.id;
+            }
+          }
+        });
+      }
+    }
+  }
 
   const kept: Bullet[] = [];
   for (const b of next.bullets) {
@@ -357,8 +672,11 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
         if (t.hp <= 0) {
           t.alive = false;
           t.respawn = RESPAWN_TICKS;
+          t.deathTime = next.frame; // 记录死亡时间
           next.tanks[b.owner].score += 1;
           next.explosions.push({ id: `boom-${b.id}`, x: t.x, y: t.y, t: 34 });
+          // 生成爆炸碎片
+          next.debris.push(...generateDebris(t, next.frame));
           if (next.tanks[b.owner].score >= 5) {
             next.phase = "ended";
             next.winner = b.owner;
@@ -369,6 +687,102 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
     if (!didHit) kept.push(b);
   }
   next.bullets = kept;
+
+  // 处理路人NPC - 先清理已消失的
+  next.pedestrians = next.pedestrians.filter(ped => {
+    if (!ped.alive && ped.deathTimer <= 0) {
+      return false; // 移除已消失的
+    }
+    return true;
+  });
+  
+  // 处理剩余路人
+  next.pedestrians.forEach((ped, idx) => {
+    if (!ped.alive) {
+      // 已经死亡，只更新计时器
+      if (ped.deathTimer > 0) {
+        ped.deathTimer--;
+      }
+      return;
+    }
+    
+    // 更新计时器
+    ped.changeDirectionTimer--;
+    
+    // 随机改变方向
+    if (ped.changeDirectionTimer <= 0) {
+      ped.angle = Math.random() * Math.PI * 2;
+      ped.changeDirectionTimer = Math.floor(Math.random() * 120) + 60;
+    }
+    
+    // 移动
+    const newX = ped.x + Math.cos(ped.angle) * ped.speed;
+    const newY = ped.y + Math.sin(ped.angle) * ped.speed;
+    
+    // 检查是否能移动到新位置（不能进墙或河）
+    if (!blocked(newX, newY, 6, walls) && !isInRiver(newX, newY, 6)) {
+      ped.x = newX;
+      ped.y = newY;
+    } else {
+      // 碰到障碍，立即改变方向
+      ped.angle = Math.random() * Math.PI * 2;
+      ped.changeDirectionTimer = Math.floor(Math.random() * 60) + 30;
+    }
+    
+    // 检测坦克碾压
+    (Object.values(next.tanks) as Tank[]).forEach(tank => {
+      if (tank.alive) {
+        const dist = Math.hypot(ped.x - tank.x, ped.y - tank.y);
+        if (dist < TANK_R + 8) {
+          // 被坦克碾压，倒地
+          ped.alive = false;
+          ped.deathTimer = 180; // 3秒后消失
+          ped.bloodX = ped.x;
+          ped.bloodY = ped.y;
+          // 记录固定的死亡状态
+          ped.deathAngle = ped.angle + (Math.random() * 0.5);
+          ped.bloodSize = 12 + Math.random() * 8;
+          ped.splatterData = [];
+          for (let i = 0; i < 5; i++) {
+            ped.splatterData.push({
+              size: 2 + Math.random() * 4,
+              angle: Math.random() * Math.PI * 2,
+              dist: 6 + Math.random() * 10,
+            });
+          }
+        }
+      }
+    });
+  });
+
+  // 检测子弹击杀路人
+  next.bullets.forEach(bullet => {
+    next.pedestrians.forEach(ped => {
+      if (ped.alive) {
+          const dist = Math.hypot(bullet.x - ped.x, bullet.y - ped.y);
+          if (dist < 10) {
+            // 被子弹击杀，倒地
+            ped.alive = false;
+            ped.deathTimer = 180; // 3秒后消失
+            ped.bloodX = ped.x;
+            ped.bloodY = ped.y;
+            // 记录固定的死亡状态
+            ped.deathAngle = ped.angle + (Math.random() * 0.5);
+            ped.bloodSize = 12 + Math.random() * 8;
+            ped.splatterData = [];
+            for (let i = 0; i < 5; i++) {
+              ped.splatterData.push({
+                size: 2 + Math.random() * 4,
+                angle: Math.random() * Math.PI * 2,
+                dist: 6 + Math.random() * 10,
+              });
+            }
+            bullet.life = 0; // 子弹消失
+          }
+        }
+    });
+  });
+
   if (next.refreshTimer <= 0) {
     return refreshBattlefield(next);
   }
@@ -388,6 +802,8 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, state: GameState, focus: Pla
   const sy = mh / H;
   const explored = state.explored[focus];
   const myTank = state.tanks[focus];
+  const enemyId = focus === "p1" ? "p2" : "p1";
+  const enemy = state.tanks[enemyId];
 
   ctx.save();
   ctx.shadowBlur = 18;
@@ -427,6 +843,30 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, state: GameState, focus: Pla
     ctx.lineWidth = 1;
     ctx.strokeRect(x + wall.x * sx, y + wall.y * sy, wall.w * sx, wall.h * sy);
   });
+
+  // 检查是否需要显示敌人位置提示
+  if (state.showingHint[focus] && enemy.alive && myTank.alive) {
+    // 闪烁效果
+    const flash = Math.floor(state.frame / 10) % 2 === 0;
+    if (flash) {
+      ctx.fillStyle = enemy.color;
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath();
+      ctx.arc(x + enemy.x * sx, y + enemy.y * sy, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      
+      // 添加外圈脉冲效果
+      const pulseSize = 10 + Math.sin(state.frame * 0.1) * 3;
+      ctx.strokeStyle = enemy.color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.arc(x + enemy.x * sx, y + enemy.y * sy, pulseSize, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
 
   // 小地图不显示敌人坐标；只显示自己的定位点和已探索地形。
   if (myTank.alive) {
@@ -665,14 +1105,192 @@ function drawGame3D(
   });
 
   state.explosions.forEach((e) => {
-    if (!isCurrentlyVisible(me, e.x, e.y)) return;
-    const radius = Math.max(8, 42 - e.t);
+    // 即使自己死亡也能看到自己的爆炸特效
+    const distance = Math.hypot(me.x - e.x, me.y - e.y);
+    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored[focus], e.x, e.y);
+    if (!visible) return;
+    
+    const radius = Math.max(10, 60 - e.t * 1.2); // 更大的爆炸
     const boom = new THREE.Mesh(
-      new THREE.SphereGeometry(radius, 24, 12),
-      new THREE.MeshBasicMaterial({ color: 0xff6a1f, transparent: true, opacity: Math.max(.12, e.t / 34) })
+      new THREE.SphereGeometry(radius, 32, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff6a1f, transparent: true, opacity: Math.max(.15, e.t / 34) })
     );
-    boom.position.copy(worldToThree(e.x, e.y, 34));
+    boom.position.copy(worldToThree(e.x, e.y, 40));
     scene.add(boom);
+    
+    // 额外添加一个更大的白色闪光效果
+    const flash = new THREE.Mesh(
+      new THREE.SphereGeometry(radius * 1.3, 32, 16),
+      new THREE.MeshBasicMaterial({ color: 0xffffaa, transparent: true, opacity: Math.max(.1, e.t / 50) })
+    );
+    flash.position.copy(worldToThree(e.x, e.y, 45));
+    scene.add(flash);
+  });
+
+  // 渲染爆炸碎片
+  state.debris.forEach((d) => {
+    // 即使自己死亡也能看到自己的碎片
+    const distance = Math.hypot(me.x - d.x, me.y - d.y);
+    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored[focus], d.x, d.y);
+    if (!visible) return;
+    
+    const opacity = Math.max(.1, d.t / 100);
+    const height = 20 + (100 - d.t) * 0.5; // 碎片稍微升高然后下落
+    
+    // 随机形状的碎片
+    const geometry = Math.random() > 0.5 
+      ? new THREE.BoxGeometry(d.size, d.size * 0.6, d.size * 0.8)
+      : new THREE.TetrahedronGeometry(d.size * 0.7);
+      
+    const debrisMesh = new THREE.Mesh(
+      geometry,
+      new THREE.MeshStandardMaterial({ 
+        color: d.color, 
+        transparent: true, 
+        opacity, 
+        roughness: 0.5, 
+        metalness: 0.5,
+        emissive: d.color,
+        emissiveIntensity: Math.max(0, d.t / 150) // 发光效果
+      })
+    );
+    debrisMesh.position.copy(worldToThree(d.x, d.y, height));
+    debrisMesh.rotation.set(d.rot * 0.5, d.rot, d.rot * 0.3);
+    scene.add(debrisMesh);
+  });
+
+  // 渲染路人NPC
+  state.pedestrians.forEach((ped) => {
+    // 检查路人是否可见（包括倒地状态）
+    const distance = Math.hypot(me.x - ped.x, me.y - ped.y);
+    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored[focus], ped.x, ped.y);
+    if (!visible) return;
+    
+    if (ped.alive) {
+      // 创建一个站立的小人形状
+      const bodyGeom = new THREE.CapsuleGeometry(4, 10, 4, 8);
+      const headGeom = new THREE.SphereGeometry(5, 12, 8);
+      
+      const bodyMat = new THREE.MeshStandardMaterial({ 
+        color: ped.color, 
+        roughness: 0.7, 
+        metalness: 0.1 
+      });
+      const headMat = new THREE.MeshStandardMaterial({ 
+        color: 0xffdbac, 
+        roughness: 0.8 
+      });
+      
+      const body = new THREE.Mesh(bodyGeom, bodyMat);
+      const head = new THREE.Mesh(headGeom, headMat);
+      
+      const pedGroup = new THREE.Group();
+      pedGroup.add(body);
+      pedGroup.add(head);
+      
+      head.position.y = 10;
+      
+      // 添加简单的手臂
+      const armGeom = new THREE.CapsuleGeometry(2, 6, 4, 6);
+      const leftArm = new THREE.Mesh(armGeom, bodyMat);
+      const rightArm = new THREE.Mesh(armGeom, bodyMat);
+      leftArm.position.set(-5, 5, 0);
+      leftArm.rotation.z = Math.PI / 4;
+      rightArm.position.set(5, 5, 0);
+      rightArm.rotation.z = -Math.PI / 4;
+      pedGroup.add(leftArm, rightArm);
+      
+      // 简单的行走动画 - 手臂摆动
+      const armOffset = Math.sin(state.frame * 0.15) * 0.3;
+      leftArm.rotation.z = Math.PI / 4 + armOffset;
+      rightArm.rotation.z = -Math.PI / 4 - armOffset;
+      
+      pedGroup.position.copy(worldToThree(ped.x, ped.y, 8));
+      pedGroup.rotation.y = -ped.angle + Math.PI / 2;
+      
+      scene.add(pedGroup);
+    } else {
+      // 计算透明度（淡出效果）
+      const fadeOpacity = Math.min(1, ped.deathTimer / 60); // 最后1秒淡出
+      
+      // 倒地的路人
+      const bodyGeom = new THREE.CapsuleGeometry(4, 10, 4, 8);
+      const headGeom = new THREE.SphereGeometry(5, 12, 8);
+      
+      const bodyMat = new THREE.MeshStandardMaterial({ 
+        color: ped.color, 
+        roughness: 0.8, 
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.8 * fadeOpacity
+      });
+      const headMat = new THREE.MeshStandardMaterial({ 
+        color: 0xffdbac, 
+        roughness: 0.9,
+        transparent: true,
+        opacity: 0.8 * fadeOpacity
+      });
+      
+      const body = new THREE.Mesh(bodyGeom, bodyMat);
+      const head = new THREE.Mesh(headGeom, headMat);
+      
+      const pedGroup = new THREE.Group();
+      pedGroup.add(body);
+      pedGroup.add(head);
+      
+      head.position.y = 2;
+      body.rotation.x = Math.PI / 2;
+      
+      // 添加倒地的手臂
+      const armGeom = new THREE.CapsuleGeometry(2, 6, 4, 6);
+      const leftArm = new THREE.Mesh(armGeom, bodyMat);
+      const rightArm = new THREE.Mesh(armGeom, bodyMat);
+      leftArm.position.set(-6, 2, 2);
+      leftArm.rotation.x = Math.PI / 2;
+      leftArm.rotation.z = Math.PI / 3;
+      rightArm.position.set(6, 2, -2);
+      rightArm.rotation.x = Math.PI / 2;
+      rightArm.rotation.z = -Math.PI / 3;
+      pedGroup.add(leftArm, rightArm);
+      
+      pedGroup.position.copy(worldToThree(ped.x, ped.y, 3));
+      pedGroup.rotation.y = -ped.deathAngle + Math.PI / 2; // 使用固定的死亡角度
+      
+      scene.add(pedGroup);
+      
+      // 渲染血迹（带淡出效果，使用固定的大小和位置）
+      const bloodGeom = new THREE.CircleGeometry(ped.bloodSize, 16);
+      const bloodMat = new THREE.MeshBasicMaterial({ 
+        color: 0x8b0000,
+        transparent: true,
+        opacity: 0.7 * fadeOpacity,
+        side: THREE.DoubleSide
+      });
+      const blood = new THREE.Mesh(bloodGeom, bloodMat);
+      blood.rotation.x = -Math.PI / 2;
+      blood.position.copy(worldToThree(ped.bloodX, ped.bloodY, 0.5));
+      
+      // 添加多个小圆点血迹（使用固定数据）
+      ped.splatterData.forEach((splatter) => {
+        const splatterGeom = new THREE.CircleGeometry(splatter.size, 8);
+        const splatterMat = new THREE.MeshBasicMaterial({ 
+          color: 0x8b0000,
+          transparent: true,
+          opacity: 0.5 * fadeOpacity,
+          side: THREE.DoubleSide
+        });
+        const splatterMesh = new THREE.Mesh(splatterGeom, splatterMat);
+        splatterMesh.rotation.x = -Math.PI / 2;
+        splatterMesh.position.copy(worldToThree(
+          ped.bloodX + Math.cos(splatter.angle) * splatter.dist, 
+          ped.bloodY + Math.sin(splatter.angle) * splatter.dist, 
+          0.6
+        ));
+        scene.add(splatterMesh);
+      });
+      
+      scene.add(blood);
+    }
   });
 
   const fogRadius = new THREE.Mesh(
@@ -750,6 +1368,10 @@ export default function Home({ targetSection }: HomeProps) {
   const lastHpRef = useRef<number | null>(null);
   const lastEnemyAliveRef = useRef<boolean | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const originalMusicVolumeRef = useRef(0.5);
+  const synthRef = useRef<SpeechSynthesis | null>(null);
+  const speechInitializedRef = useRef(false);
+  const lastPedestriansAliveRef = useRef<Map<string, boolean>>(new Map());
   const menuRef = useRef<HTMLDivElement>(null);
 
   const playerId: PlayerId = role === "guest" ? "p2" : "p1";
@@ -765,6 +1387,13 @@ export default function Home({ targetSection }: HomeProps) {
     audio.loop = true;
     audio.volume = musicVolume;
     audioRef.current = audio;
+    originalMusicVolumeRef.current = musicVolume;
+    
+    // 初始化语音合成
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      synthRef.current = window.speechSynthesis;
+      console.log('🎤 Speech synthesis initialized');
+    }
     
     audio.addEventListener('canplay', () => {
       console.log('✅ Local audio loaded successfully');
@@ -777,8 +1406,98 @@ export default function Home({ targetSection }: HomeProps) {
     return () => {
       audio.pause();
       audioRef.current = null;
+      if (synthRef.current) {
+        synthRef.current.cancel();
+      }
     };
   }, []);
+  
+  // 初始化lastPedestriansAliveRef
+  useEffect(() => {
+    const aliveMap = new Map<string, boolean>();
+    state.pedestrians.forEach(ped => {
+      aliveMap.set(ped.id, ped.alive);
+    });
+    lastPedestriansAliveRef.current = aliveMap;
+  }, []);
+  
+  // 检测NPC死亡并播放语音
+  useEffect(() => {
+    if (!synthRef.current || state.phase !== 'playing') return;
+    
+    // 检查有哪些NPC刚刚死亡（之前活着，现在死了）
+    let hasDeath = false;
+    state.pedestrians.forEach(ped => {
+      const wasAlive = lastPedestriansAliveRef.current.get(ped.id);
+      if (wasAlive === true && !ped.alive) {
+        hasDeath = true;
+        console.log('💀 NPC died:', ped.id); // 调试日志
+      }
+    });
+    
+    // 如果有NPC死亡，播放语音
+    if (hasDeath) {
+      console.log('🔊 About to play death voice...'); // 调试日志
+      playDeathVoice(synthRef.current!);
+    }
+    
+    // 更新上一帧的状态
+    const newAliveMap = new Map<string, boolean>();
+    state.pedestrians.forEach(ped => {
+      newAliveMap.set(ped.id, ped.alive);
+    });
+    lastPedestriansAliveRef.current = newAliveMap;
+  }, [state.pedestrians, state.phase]);
+  
+  // 第一次用户交互时，激活语音合成（浏览器安全策略要求）
+  useEffect(() => {
+    const initSpeech = () => {
+      if (!speechInitializedRef.current && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        console.log('🎤 Activating speech synthesis on user interaction...');
+        // 关键：必须在用户交互中调用一次getVoices来激活
+        window.speechSynthesis.getVoices();
+        // 使用一个非常短的静音语音来激活，但不打断其他音频
+        const testUtterance = new SpeechSynthesisUtterance(' ');
+        testUtterance.volume = 0;
+        testUtterance.rate = 10; // 最快速度
+        window.speechSynthesis.speak(testUtterance);
+        // 立即取消，只是为了激活
+        setTimeout(() => {
+          window.speechSynthesis.cancel();
+        }, 50);
+        speechInitializedRef.current = true;
+        console.log('✅ Speech synthesis activated');
+      }
+    };
+    // 添加用户交互监听
+    document.addEventListener('click', initSpeech, { once: true });
+    document.addEventListener('keydown', initSpeech, { once: true });
+    document.addEventListener('touchstart', initSpeech, { once: true });
+    
+    return () => {
+      document.removeEventListener('click', initSpeech);
+      document.removeEventListener('keydown', initSpeech);
+      document.removeEventListener('touchstart', initSpeech);
+    };
+  }, []);
+
+  // 游戏状态变化时控制背景音乐播放
+  useEffect(() => {
+    if (!audioRef.current) return;
+    
+    if (state.phase === 'playing') {
+      // 游戏开始，暂停背景音乐
+      console.log('🎮 Game started - pausing music');
+      audioRef.current.pause();
+    } else {
+      // 非游戏状态（菜单、结束、大厅），恢复背景音乐
+      console.log('🎮 Game ended/menu - resuming music');
+      audioRef.current.volume = originalMusicVolumeRef.current;
+      if (musicPlaying) { // 只有在音乐开启时才播放
+        audioRef.current.play().catch(() => {});
+      }
+    }
+  }, [state.phase, musicPlaying]);
 
   // 播放/暂停控制
   useEffect(() => {
@@ -799,10 +1518,14 @@ export default function Home({ targetSection }: HomeProps) {
   // 实时音量控制
   useEffect(() => {
     if (audioRef.current) {
-      audioRef.current.volume = musicVolume;
+      originalMusicVolumeRef.current = musicVolume;
+      // 如果不在游戏中，直接应用音量
+      if (state.phase !== 'playing') {
+        audioRef.current.volume = musicVolume;
+      }
       console.log('🔊 Volume changed:', musicVolume);
     }
-  }, [musicVolume]);
+  }, [musicVolume, state.phase]);
 
   // 菜单透明度控制
   useEffect(() => {
@@ -869,12 +1592,14 @@ export default function Home({ targetSection }: HomeProps) {
         
         const demoInput1: PlayerInput = {
           ...currentDir1,
-          fire: Math.random() > 0.98 // 更低频率的射击
+          fire: Math.random() > 0.98, // 更低频率的射击
+          suicide: false
         };
         
         const demoInput2: PlayerInput = {
           ...currentDir2,
-          fire: Math.random() > 0.98
+          fire: Math.random() > 0.98,
+          suicide: false
         };
         
         // 自动开始游戏如果还没开始
@@ -941,7 +1666,8 @@ export default function Home({ targetSection }: HomeProps) {
           
           p2Input = {
             ...aiDir2Ref.current,
-            fire: Math.random() > 0.98
+            fire: Math.random() > 0.98,
+            suicide: false
           };
         }
         
@@ -1373,9 +2099,9 @@ export default function Home({ targetSection }: HomeProps) {
             </AnimatePresence>
 
             <AnimatePresence>
-              {!myTank.alive && myTank.respawn > 0 && state.phase === "playing" && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 z-[7] grid place-items-center bg-black/38 backdrop-blur-[2px]">
-                  <div className="respawn-pulse border-4 border-[#ffcf33] bg-[#1b0e0a]/94 px-8 py-6 text-center shadow-[10px_10px_0_#000]">
+              {!myTank.alive && myTank.respawn > 0 && state.phase === "playing" && (state.frame - myTank.deathTime) > 30 && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 z-[7] grid place-items-center">
+                  <div className="respawn-pulse text-center">
                     <div className="text-sm font-black tracking-[0.34em] text-[#ffcf33]">RESPAWN</div>
                     <div
                       className="arcade-number mt-3 text-7xl font-black leading-none text-[#fff2a6] sm:text-8xl"
@@ -1383,7 +2109,7 @@ export default function Home({ targetSection }: HomeProps) {
                     >
                       {respawnSeconds}
                     </div>
-                    <div className="mt-3 border border-[#ffcf33]/35 bg-black/18 px-3 py-2 text-sm text-[#f3cabd]">你已被击毁，5 秒后将在地图随机位置重生</div>
+                    <div className="mt-3 px-3 py-2 text-sm text-[#f3cabd]">你已被击毁，5 秒后将在地图随机位置重生</div>
                   </div>
                 </motion.div>
               )}
@@ -1445,6 +2171,12 @@ export default function Home({ targetSection }: HomeProps) {
               onPointerUp={() => { fireLockRef.current = false; hold("fire", false); }}
               onPointerCancel={() => { fireLockRef.current = false; hold("fire", false); }}
             >开火</button>
+            
+            {/* 自爆按钮 */}
+            <button
+              className="select-none border-4 border-[#ff3366] bg-[#2a0915] text-xl font-black text-[#ff3366] shadow-[10px_10px_0_#000] transition active:translate-x-1 active:translate-y-1 active:shadow-none min-w-[100px] min-h-[60px] px-4 py-3"
+              onClick={() => { if (state.phase === "playing" && state.tanks[playerId].alive) { hold("suicide", true); setTimeout(() => hold("suicide", false), 100); } }}
+            >自爆</button>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 border border-[#ffcf33]/25 bg-[#11150d]/70 px-3 py-2 text-xs text-[#d8d2ad]">
             <span>主画面：正后方俯视3D</span><span>小地图：只显示已探索地形</span><span>敌人：进入视野才显示</span><span>触控：方向键 + 开火</span>
