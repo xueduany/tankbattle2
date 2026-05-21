@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "karpathy-guidelines": {
+      "source": "swarmclawai/andrej-karpathy-skills",
+      "sourceType": "github",
+      "computedHash": "6706208ef337fee07ee42d978c8ce9029450dcbec350ad9a6def95de3f22e620"
+    }
+  }
+}
