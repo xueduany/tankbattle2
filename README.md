@@ -4,13 +4,13 @@
   <p>A multiplayer tank battle game based on Socket.IO, supporting up to 4 players</p>
   
   <div align="center">
-    <a href="https://tankbattle-kappa.vercel.app/" target="_blank"><img src="https://img.shields.io/badge/live-demo-green" alt="Live Demo"/></a>
+    <a href="https://tankbattle-2--xueduanyang.replit.app/" target="_blank"><img src="https://img.shields.io/badge/live-demo-green" alt="Live Demo"/></a>
     <a href="https://github.com/xueduany/tankbattle/actions"><img src="https://img.shields.io/badge/build-passing-green" alt="Build Status"/></a>
     <a href="https://github.com/xueduany/tankbattle/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/></a>
     <a href="https://github.com/xueduany/tankbattle"><img src="https://img.shields.io/github/stars/xueduany/tankbattle" alt="Stars"/></a>
   </div>
   
-  <p>🌐 <a href="https://tankbattle-kappa.vercel.app/" target="_blank">在线体验 / Play Online</a></p>
+  <p>🌐 <a href="https://tankbattle-2--xueduanyang.replit.app/" target="_blank">在线体验 / Play Online</a></p>
   
   <p>
     📖 <a href="#-部署指南--deployment-guide">部署指南</a> | 
