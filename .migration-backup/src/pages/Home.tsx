@@ -1500,6 +1500,7 @@ export default function Home({ targetSection }: HomeProps) {
   const predictedStateRef = useRef<GameState | null>(null);
   const lastReceivedStateRef = useRef<GameState | null>(null);
   const interpolationAlphaRef = useRef(0);
+  const interpolationStartTimeRef = useRef(0);
   const fireLockRef = useRef(false);
   const lastHpRef = useRef<number | null>(null);
   const lastEnemyAliveRef = useRef<boolean | null>(null);
@@ -1745,11 +1746,77 @@ export default function Home({ targetSection }: HomeProps) {
     return () => window.clearInterval(demoTick);
   }, [demoMode, role]);
 
+  // 插值后的渲染状态
+  const [renderState, setRenderState] = useState<GameState>(state);
+  const lastRenderedStateRef = useRef<GameState | null>(null);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     const hud = hudRef.current;
-    if (canvas && hud) drawGame3D(canvas, hud, state, playerId, rendererRef, tankStyles);
-  }, [state, playerId, tankStyles]);
+    if (canvas && hud) {
+      drawGame3D(canvas, hud, renderState, playerId, rendererRef, tankStyles);
+    }
+  }, [renderState, playerId, tankStyles]);
+
+  // 插值渲染循环
+  useEffect(() => {
+    let animationFrameId: number;
+    let lastTime = 0;
+    const SYNC_RATE = 10; // 10 FPS
+    const INTERPOLATION_WINDOW = 1000 / SYNC_RATE; // 100ms
+    
+    const interpolateState = () => {
+      if (role === "guest" && lastReceivedStateRef.current && lastReceivedStateRef.current.phase === "playing") {
+        // 计算插值进度
+        const now = Date.now();
+        if (interpolationStartTimeRef.current === 0) {
+          interpolationStartTimeRef.current = now;
+        }
+        const elapsed = now - interpolationStartTimeRef.current;
+        let alpha = Math.min(elapsed / INTERPOLATION_WINDOW, 1);
+        // 使用平滑曲线
+        alpha = alpha * alpha * (3 - 2 * alpha);
+        
+        // 深度克隆，避免修改原始状态
+        const newRenderState = JSON.parse(JSON.stringify(state));
+        
+        // 对所有坦克进行位置插值
+        for (const tankId in newRenderState.tanks) {
+          const tank = newRenderState.tanks[tankId as PlayerId];
+          const lastTank = lastReceivedStateRef.current.tanks[tankId as PlayerId];
+          if (tank && lastTank) {
+            tank.x = lastTank.x + (tank.x - lastTank.x) * alpha;
+            tank.y = lastTank.y + (tank.y - lastTank.y) * alpha;
+            // 角度插值要考虑环绕问题
+            const angleDiff = tank.angle - lastTank.angle;
+            const normalizedAngleDiff = ((angleDiff + Math.PI) % (Math.PI * 2)) - Math.PI;
+            tank.angle = lastTank.angle + normalizedAngleDiff * alpha;
+          }
+        }
+        
+        // 对所有子弹进行位置插值
+        newRenderState.bullets.forEach((bullet, i) => {
+          if (lastReceivedStateRef.current.bullets[i]) {
+            const lastBullet = lastReceivedStateRef.current.bullets[i];
+            bullet.x = lastBullet.x + (bullet.x - lastBullet.x) * alpha;
+            bullet.y = lastBullet.y + (bullet.y - lastBullet.y) * alpha;
+          }
+        });
+        
+        // 更新渲染状态
+        setRenderState(newRenderState);
+      } else {
+        // 主机或不需要插值，直接用 state
+        setRenderState(state);
+      }
+      
+      animationFrameId = requestAnimationFrame(interpolateState);
+    };
+    
+    interpolateState();
+    
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [state, role]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent, down: boolean) => {
@@ -2087,6 +2154,11 @@ export default function Home({ targetSection }: HomeProps) {
     
     socket.on('gameStateUpdated', (newState) => {
       try {
+        // 保存上一个状态用于插值
+        if (role === "guest" && stateRef.current && stateRef.current.phase === "playing") {
+          lastReceivedStateRef.current = JSON.parse(JSON.stringify(stateRef.current));
+          interpolationStartTimeRef.current = Date.now(); // 记录接收到新状态的时间
+        }
         setState(newState);
       } catch (e) {
         console.error("❌ 应用游戏状态失败:", e);
