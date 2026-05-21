@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "多人坦克大战"
+version = "1.0.0"
+id = "artifacts/tank-duel"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19419
+
+[services.development]
+run = "pnpm --filter @workspace/tank-duel run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/tank-duel", "run", "build" ]
+publicDir = "artifacts/tank-duel/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19419"
+BASE_PATH = "/"

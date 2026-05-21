@@ -1,17 +1,28 @@
+modules = ["nodejs-24"]
 
-# The command to run when the repl starts
-run = "npm run server"
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
 
-# The primary programming language of the repl
-language = "nodejs"
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
 
-# The entrypoint for the repl (the file that is run)
-entrypoint = "server.js"
+[workflows]
+runButton = "Project"
 
-# Packager configuration
-[packager]
-language = "nodejs"
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
 
-[packager.features]
-packageSearch = true
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
 
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[[ports]]
+localPort = 19419
+externalPort = 3000

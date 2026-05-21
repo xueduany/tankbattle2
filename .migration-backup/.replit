@@ -1,0 +1,17 @@
+
+# The command to run when the repl starts
+run = "npm run server"
+
+# The primary programming language of the repl
+language = "nodejs"
+
+# The entrypoint for the repl (the file that is run)
+entrypoint = "server.js"
+
+# Packager configuration
+[packager]
+language = "nodejs"
+
+[packager.features]
+packageSearch = true
+
