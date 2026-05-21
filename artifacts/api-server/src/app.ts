@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
@@ -26,6 +26,18 @@ app.use(
   }),
 );
 app.use(cors());
+
+// 保存原始请求体，供 webhook 签名验证使用
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  const chunks: Buffer[] = [];
+  req.on("data", (chunk: Buffer) => chunks.push(chunk));
+  req.on("end", () => {
+    (req as unknown as { rawBody: Buffer }).rawBody = Buffer.concat(chunks);
+    next();
+  });
+  req.on("error", next);
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
