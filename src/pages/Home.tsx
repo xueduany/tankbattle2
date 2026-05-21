@@ -9,8 +9,8 @@
 // ============== Socket.IO 网络配置 ==============
 // 配置 Socket.IO 服务器地址
 // - 本地开发: "http://localhost:3000"
-// - 生产环境: 改为你的 Socket.IO 服务器地址，如 "https://your-socket-server.onrender.com"
-const SERVER_URL = import.meta.env.VITE_SOCKET_SERVER_URL || "http://localhost:3000";
+// - 生产环境: "https://tankbattle-2--xueduanyang.replit.app"
+const SERVER_URL = import.meta.env.VITE_SOCKET_SERVER_URL || "https://tankbattle-2--xueduanyang.replit.app";
 // ==============================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
