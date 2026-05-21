@@ -6,33 +6,16 @@
 - 游戏区保持横屏优先，但竖屏也能操作
 */
 
-// ============== PeerJS 网络配置 ==============
-// 切换下方的 USE_LOCAL_SERVER 来选择使用哪个信令服务器
-const USE_LOCAL_SERVER = false; // 改为 true 来使用本地信令服务器
-
-const PEER_CONFIG = USE_LOCAL_SERVER ? {
-  // 本地信令服务器配置（需要先运行 npm run signal）
-  host: window.location.hostname, // 或者你的内网 IP，比如 '192.168.1.100'
-  port: 9000,
-  path: '/peerjs/myapp',
-  secure: false,
-  config: {
-    iceServers: [] // 纯内网不需要 STUN 服务器
-  }
-} : {
-  // 公共信令服务器配置（Google STUN）
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-    ]
-  }
-};
-// ===========================================
+// ============== Socket.IO 网络配置 ==============
+// 配置 Socket.IO 服务器地址
+// - 本地开发: "http://localhost:3000"
+// - 生产环境: 改为你的 Socket.IO 服务器地址，如 "https://your-socket-server.onrender.com"
+const SERVER_URL = import.meta.env.VITE_SOCKET_SERVER_URL || "http://localhost:3000";
+// ==============================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Peer from "peerjs";
+import { io } from "socket.io-client";
 import * as THREE from "three";
-import type { DataConnection } from "peerjs";
 import { motion, AnimatePresence } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,11 +29,12 @@ interface HomeProps {
   targetSection?: string;
 }
 
-type PlayerId = "p1" | "p2";
+type PlayerId = "p1" | "p2" | "p3" | "p4";
 type Role = "menu" | "host" | "guest";
 type Phase = "lobby" | "playing" | "ended";
 type Message =
   | { type: "join" }
+  | { type: "assign"; playerId: PlayerId }
   | { type: "input"; input: PlayerInput }
   | { type: "state"; state: GameState }
   | { type: "restart" };
@@ -179,6 +163,15 @@ function isInRiver(x: number, y: number, r: number) {
 }
 const EMPTY_INPUT: PlayerInput = { up: false, down: false, left: false, right: false, fire: false, suicide: false };
 
+const PLAYER_COLORS: Record<PlayerId, string> = {
+  p1: "#ffcf33",
+  p2: "#36e0ff",
+  p3: "#ff6b6b",
+  p4: "#51cf66",
+};
+
+const ALL_PLAYERS: PlayerId[] = ["p1", "p2", "p3", "p4"];
+
 type TankStyleId = "vanguard" | "raptor" | "atlas" | "specter";
 const TANK_STYLES: Record<TankStyleId, { name: string; desc: string; primary: string; secondary: string; body: string; shape: "classic" | "speed" | "heavy" | "stealth" }> = {
   vanguard: { name: "先锋黄蜂", desc: "均衡履带，炮塔醒目", primary: "#ffd43b", secondary: "#ff7a1a", body: "#304a2a", shape: "classic" },
@@ -235,11 +228,52 @@ function playDeathVoice(synth: SpeechSynthesis) {
   }
 }
 
-function freshState(): GameState {
+function freshState(playersOrAll: PlayerId[] | boolean = ["p1", "p2"]): GameState {
   const mapSeed = getInitialMapSeed();
   const walls = generateWalls(mapSeed);
-  const p1 = randomSpawn(walls);
-  const p2 = randomSpawn(walls, { x: p1.x, y: p1.y });
+  
+  // 确定活跃玩家
+  let activePlayers: PlayerId[];
+  if (Array.isArray(playersOrAll)) {
+    activePlayers = playersOrAll;
+  } else if (playersOrAll === true) {
+    activePlayers = ALL_PLAYERS;
+  } else {
+    activePlayers = ["p1", "p2"];
+  }
+  
+  const tanks: GameState["tanks"] = {} as any;
+  const explored: GameState["explored"] = {} as any;
+  const lastSeenEnemy: GameState["lastSeenEnemy"] = {} as any;
+  const showingHint: GameState["showingHint"] = {} as any;
+  
+  const spawns: Array<{x: number, y: number, a: number}> = [];
+  for (let i = 0; i < activePlayers.length; i++) {
+    const exclude = i > 0 ? spawns[i - 1] : undefined;
+    spawns.push(randomSpawn(walls, exclude));
+  }
+  
+  activePlayers.forEach((playerId, index) => {
+    const spawn = spawns[index];
+    tanks[playerId] = { 
+      id: playerId, 
+      x: spawn.x, 
+      y: spawn.y, 
+      angle: spawn.a, 
+      hp: 5, 
+      cooldown: 0, 
+      crashCooldown: 0, 
+      score: 0, 
+      color: PLAYER_COLORS[playerId], 
+      alive: true, 
+      respawn: 0, 
+      deathTime: 0 
+    };
+    explored[playerId] = Array(FOG_COUNT).fill(false);
+    lastSeenEnemy[playerId] = 0;
+    showingHint[playerId] = false;
+  });
+  
   return {
     phase: "lobby",
     frame: 0,
@@ -249,13 +283,10 @@ function freshState(): GameState {
     explosions: [],
     debris: [],
     pedestrians: generatePedestrians(walls, mapSeed),
-    tanks: {
-      p1: { id: "p1", x: p1.x, y: p1.y, angle: p1.a, hp: 5, cooldown: 0, crashCooldown: 0, score: 0, color: "#ffcf33", alive: true, respawn: 0, deathTime: 0 },
-      p2: { id: "p2", x: p2.x, y: p2.y, angle: p2.a, hp: 5, cooldown: 0, crashCooldown: 0, score: 0, color: "#36e0ff", alive: true, respawn: 0, deathTime: 0 },
-    },
-    explored: { p1: Array(FOG_COUNT).fill(false), p2: Array(FOG_COUNT).fill(false) },
-    lastSeenEnemy: { p1: 0, p2: 0 },
-    showingHint: { p1: false, p2: false },
+    tanks,
+    explored,
+    lastSeenEnemy,
+    showingHint,
   };
 }
 
@@ -361,12 +392,42 @@ function generatePedestrians(walls: any[], mapSeed: number): Pedestrian[] {
   
   return pedestrians;
 }
-function refreshBattlefield(state: GameState) {
+function refreshBattlefield(state: GameState, enableAllPlayers = false) {
   const mapSeed = Date.now() + state.frame;
   persistMapSeed(mapSeed);
   const walls = generateWalls(mapSeed);
-  const p1 = randomSpawn(walls);
-  const p2 = randomSpawn(walls, { x: p1.x, y: p1.y });
+  
+  const activePlayers: PlayerId[] = Object.keys(state.tanks) as PlayerId[];
+  
+  const tanks: GameState["tanks"] = {} as any;
+  const explored: GameState["explored"] = {} as any;
+  const lastSeenEnemy: GameState["lastSeenEnemy"] = {} as any;
+  const showingHint: GameState["showingHint"] = {} as any;
+  
+  const spawns: Array<{x: number, y: number, a: number}> = [];
+  for (let i = 0; i < activePlayers.length; i++) {
+    const exclude = i > 0 ? spawns[i - 1] : undefined;
+    spawns.push(randomSpawn(walls, exclude));
+  }
+  
+  activePlayers.forEach((playerId, index) => {
+    const spawn = spawns[index];
+    tanks[playerId] = { 
+      ...state.tanks[playerId],
+      x: spawn.x, 
+      y: spawn.y, 
+      angle: spawn.a, 
+      hp: 5, 
+      cooldown: 20, 
+      alive: true, 
+      respawn: 0, 
+      deathTime: 0 
+    };
+    explored[playerId] = Array(FOG_COUNT).fill(false);
+    lastSeenEnemy[playerId] = mapSeed;
+    showingHint[playerId] = false;
+  });
+  
   return {
     ...state,
     mapSeed,
@@ -375,13 +436,10 @@ function refreshBattlefield(state: GameState) {
     explosions: [],
     debris: [],
     pedestrians: generatePedestrians(walls, mapSeed),
-    explored: { p1: Array(FOG_COUNT).fill(false), p2: Array(FOG_COUNT).fill(false) },
-    tanks: {
-      p1: { ...state.tanks.p1, x: p1.x, y: p1.y, angle: p1.a, hp: 5, cooldown: 20, alive: true, respawn: 0, deathTime: 0 },
-      p2: { ...state.tanks.p2, x: p2.x, y: p2.y, angle: p2.a, hp: 5, cooldown: 20, alive: true, respawn: 0, deathTime: 0 },
-    },
-    lastSeenEnemy: { p1: mapSeed, p2: mapSeed },
-    showingHint: { p1: false, p2: false },
+    tanks,
+    explored,
+    lastSeenEnemy,
+    showingHint,
   };
 }
 
@@ -399,7 +457,8 @@ function revealAround(explored: boolean[], x: number, y: number) {
   }
 }
 
-function isExplored(explored: boolean[], x: number, y: number) {
+function isExplored(explored: boolean[] | undefined, x: number, y: number) {
+  if (!explored) return false;
   const c = clamp(Math.floor(x / FOG_CELL), 0, FOG_COLS - 1);
   const r = clamp(Math.floor(y / FOG_CELL), 0, FOG_ROWS - 1);
   return !!explored[r * FOG_COLS + c];
@@ -441,6 +500,17 @@ function generateDebris(tank: Tank, frame: number): Debris[] {
 function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameState {
   if (prev.phase !== "playing") return prev;
   const walls = generateWalls(prev.mapSeed);
+  
+  const activePlayers: PlayerId[] = Object.keys(prev.tanks) as PlayerId[];
+  
+  const tanks: GameState["tanks"] = {} as any;
+  const explored: GameState["explored"] = {} as any;
+  
+  activePlayers.forEach(playerId => {
+    tanks[playerId] = { ...prev.tanks[playerId] };
+    explored[playerId] = [...prev.explored[playerId]];
+  });
+  
   const next: GameState = {
     ...prev,
     frame: prev.frame + 1,
@@ -457,38 +527,37 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
       t: d.t - 1
     })).filter((d) => d.t > 0),
     pedestrians: prev.pedestrians.map(p => ({ ...p })),
-    tanks: { p1: { ...prev.tanks.p1 }, p2: { ...prev.tanks.p2 } },
-    explored: { p1: [...prev.explored.p1], p2: [...prev.explored.p2] },
+    tanks,
+    explored,
     lastSeenEnemy: { ...prev.lastSeenEnemy },
     showingHint: { ...prev.showingHint },
   };
 
   // 检查是否能看到敌人，更新最后看到的时间
-  (Object.keys(next.tanks) as PlayerId[]).forEach((playerId) => {
-    const enemyId = playerId === "p1" ? "p2" : "p1";
+  activePlayers.forEach((playerId) => {
     const player = next.tanks[playerId];
-    const enemy = next.tanks[enemyId];
-    if (player.alive && enemy.alive) {
-      const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
-      const canSeeEnemy = dist <= REVEAL_RADIUS;
-      
-      if (canSeeEnemy) {
-        // 能看到敌人，重置所有状态
-        next.lastSeenEnemy[playerId] = next.frame;
-        next.showingHint[playerId] = false;
-      } else {
-        // 看不到敌人，检查是否需要显示提示或重置
-        const timeSinceSeen = next.frame - next.lastSeenEnemy[playerId];
+    // 对所有其他玩家检查可见性
+    activePlayers.forEach(enemyId => {
+      if (enemyId === playerId) return;
+      const enemy = next.tanks[enemyId];
+      if (player.alive && enemy.alive) {
+        const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+        const canSeeEnemy = dist <= REVEAL_RADIUS;
         
-        if (timeSinceSeen >= 600 && timeSinceSeen < 720) {
-          // 10-12秒，显示提示
-          next.showingHint[playerId] = true;
-        } else if (timeSinceSeen >= 720 && next.showingHint[playerId]) {
-          // 超过12秒，结束提示并重置为10秒前的状态，开始下一个周期
-          next.lastSeenEnemy[playerId] = next.frame - 600;
+        if (canSeeEnemy) {
+          next.lastSeenEnemy[playerId] = next.frame;
           next.showingHint[playerId] = false;
         }
       }
+    });
+    
+    // 检查是否显示提示
+    const timeSinceSeen = next.frame - next.lastSeenEnemy[playerId];
+    if (timeSinceSeen >= 600 && timeSinceSeen < 720) {
+      next.showingHint[playerId] = true;
+    } else if (timeSinceSeen >= 720 && next.showingHint[playerId]) {
+      next.lastSeenEnemy[playerId] = next.frame - 600;
+      next.showingHint[playerId] = false;
     }
   });
 
@@ -569,86 +638,97 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
     }
   });
 
-  // 坦克碰撞检测 - 撞击扣血 + 物理推开
-  const p1 = next.tanks.p1;
-  const p2 = next.tanks.p2;
-  if (p1.alive && p2.alive) {
-    const dx = p1.x - p2.x;
-    const dy = p1.y - p2.y;
-    const dist = Math.hypot(dx, dy);
-    const minDist = TANK_R * 2;
-    
-    if (dist < minDist) {
-      // 两个坦克相撞！
-      const p1Input = inputs.p1 ?? EMPTY_INPUT;
-      const p2Input = inputs.p2 ?? EMPTY_INPUT;
-      const p1IsMoving = p1Input.up || p1Input.down || p1Input.left || p1Input.right;
-      const p2IsMoving = p2Input.up || p2Input.down || p2Input.left || p2Input.right;
+  // 坦克碰撞检测 - 撞击扣血 + 物理推开（多玩家版本）
+  const tankArray = activePlayers.map(id => next.tanks[id]).filter(t => t.alive);
+  
+  // 记录哪些对已经处理过碰撞，避免重复计算
+  const processedPairs = new Set<string>();
+  
+  for (let i = 0; i < tankArray.length; i++) {
+    for (let j = i + 1; j < tankArray.length; j++) {
+      const t1 = tankArray[i];
+      const t2 = tankArray[j];
+      const pairKey = [t1.id, t2.id].sort().join("-");
       
-      // 物理推开效果（即使不扣血也要推开，避免重叠）
-      const overlap = minDist - dist;
-      const pushForce = overlap * 0.5; // 推开力度
-      const nx = dx / dist;
-      const ny = dy / dist;
+      if (processedPairs.has(pairKey)) continue;
+      processedPairs.add(pairKey);
       
-      if (!isNaN(nx) && !isNaN(ny)) {
-        // 尝试推开两个坦克
-        const p1PushX = nx * pushForce;
-        const p1PushY = ny * pushForce;
-        const p2PushX = -nx * pushForce;
-        const p2PushY = -ny * pushForce;
+      const dx = t1.x - t2.x;
+      const dy = t1.y - t2.y;
+      const dist = Math.hypot(dx, dy);
+      const minDist = TANK_R * 2;
+      
+      if (dist < minDist) {
+        // 两个坦克相撞！
+        const t1Input = inputs[t1.id] ?? EMPTY_INPUT;
+        const t2Input = inputs[t2.id] ?? EMPTY_INPUT;
+        const t1IsMoving = t1Input.up || t1Input.down || t1Input.left || t1Input.right;
+        const t2IsMoving = t2Input.up || t2Input.down || t2Input.left || t2Input.right;
         
-        // 只有不被墙壁挡住时才可以推开
-        if (!blocked(p1.x + p1PushX, p1.y + p1PushY, TANK_R, walls)) {
-          p1.x += p1PushX;
-          p1.y += p1PushY;
-        }
-        if (!blocked(p2.x + p2PushX, p2.y + p2PushY, TANK_R, walls)) {
-          p2.x += p2PushX;
-          p2.y += p2PushY;
-        }
-      }
-
-      // 只有冷却时间为0时才扣血！
-      if (p1.crashCooldown === 0 && p2.crashCooldown === 0) {
-        // 添加撞击爆炸效果
-        const centerX = (p1.x + p2.x) / 2;
-        const centerY = (p1.y + p2.y) / 2;
-        next.explosions.push({ id: `crash-${next.frame}`, x: centerX, y: centerY, t: 24 });
-
-        if (p1IsMoving && p2IsMoving) {
-          // 双方都在移动，都扣血
-          p1.hp -= 1;
-          p2.hp -= 1;
-        } else if (p1IsMoving) {
-          // 只有P1在移动，只扣P2血
-          p2.hp -= 1;
-        } else if (p2IsMoving) {
-          // 只有P2在移动，只扣P1血
-          p1.hp -= 1;
-        }
+        // 物理推开效果（即使不扣血也要推开，避免重叠）
+        const overlap = minDist - dist;
+        const pushForce = overlap * 0.5; // 推开力度
+        const nx = dx / dist;
+        const ny = dy / dist;
         
-        // 设置撞击冷却时间（30帧 = 0.5秒）
-        p1.crashCooldown = 30;
-        p2.crashCooldown = 30;
-        
-        // 检查死亡
-        [p1, p2].forEach(t => {
-          if (t.hp <= 0) {
-            t.alive = false;
-            t.respawn = RESPAWN_TICKS;
-            t.deathTime = next.frame; // 记录死亡时间
-            const other = t.id === "p1" ? p2 : p1;
-            other.score += 1;
-            next.explosions.push({ id: `boom-${next.frame}`, x: t.x, y: t.y, t: 34 });
-            // 生成爆炸碎片
-            next.debris.push(...generateDebris(t, next.frame));
-            if (other.score >= 5) {
-              next.phase = "ended";
-              next.winner = other.id;
-            }
+        if (!isNaN(nx) && !isNaN(ny)) {
+          // 尝试推开两个坦克
+          const t1PushX = nx * pushForce;
+          const t1PushY = ny * pushForce;
+          const t2PushX = -nx * pushForce;
+          const t2PushY = -ny * pushForce;
+          
+          // 只有不被墙壁挡住时才可以推开
+          if (!blocked(t1.x + t1PushX, t1.y + t1PushY, TANK_R, walls)) {
+            t1.x += t1PushX;
+            t1.y += t1PushY;
           }
-        });
+          if (!blocked(t2.x + t2PushX, t2.y + t2PushY, TANK_R, walls)) {
+            t2.x += t2PushX;
+            t2.y += t2PushY;
+          }
+        }
+
+        // 只有冷却时间为0时才扣血！
+        if (t1.crashCooldown === 0 && t2.crashCooldown === 0) {
+          // 添加撞击爆炸效果
+          const centerX = (t1.x + t2.x) / 2;
+          const centerY = (t1.y + t2.y) / 2;
+          next.explosions.push({ id: `crash-${next.frame}-${t1.id}-${t2.id}`, x: centerX, y: centerY, t: 24 });
+
+          if (t1IsMoving && t2IsMoving) {
+            // 双方都在移动，都扣血
+            t1.hp -= 1;
+            t2.hp -= 1;
+          } else if (t1IsMoving) {
+            // 只有t1在移动，只扣t2血
+            t2.hp -= 1;
+          } else if (t2IsMoving) {
+            // 只有t2在移动，只扣t1血
+            t1.hp -= 1;
+          }
+          
+          // 设置撞击冷却时间（30帧 = 0.5秒）
+          t1.crashCooldown = 30;
+          t2.crashCooldown = 30;
+          
+          // 检查死亡
+          [t1, t2].forEach(t => {
+            if (t.hp <= 0 && t.alive) {
+              t.alive = false;
+              t.respawn = RESPAWN_TICKS;
+              t.deathTime = next.frame; // 记录死亡时间
+              // 给击杀者加分
+              const killerId = t.id === t1.id ? t2.id : t1.id;
+              if (next.tanks[killerId]) {
+                next.tanks[killerId].score += 1;
+              }
+              next.explosions.push({ id: `boom-${next.frame}-${t.id}`, x: t.x, y: t.y, t: 34 });
+              // 生成爆炸碎片
+              next.debris.push(...generateDebris(t, next.frame));
+            }
+          });
+        }
       }
     }
   }
@@ -783,6 +863,14 @@ function stepGame(prev: GameState, inputs: Record<PlayerId, PlayerInput>): GameS
     });
   });
 
+  // 检查获胜条件：任何玩家达到5分就结束
+  activePlayers.forEach(playerId => {
+    if (next.tanks[playerId].score >= 5) {
+      next.phase = "ended";
+      next.winner = playerId;
+    }
+  });
+
   if (next.refreshTimer <= 0) {
     return refreshBattlefield(next);
   }
@@ -800,10 +888,15 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, state: GameState, focus: Pla
   const y = H - mh - pad;
   const sx = mw / W;
   const sy = mh / H;
-  const explored = state.explored[focus];
-  const myTank = state.tanks[focus];
-  const enemyId = focus === "p1" ? "p2" : "p1";
-  const enemy = state.tanks[enemyId];
+  const explored = state.explored?.[focus] || Array(FOG_COUNT).fill(false);
+  const myTank = state.tanks?.[focus];
+  
+  // 安全检查
+  if (!myTank) return;
+  
+  // 获取所有其他玩家
+  const activePlayers = Object.keys(state.tanks || {}) as PlayerId[];
+  const otherPlayers = activePlayers.filter(id => id !== focus);
 
   ctx.save();
   ctx.shadowBlur = 18;
@@ -844,29 +937,33 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, state: GameState, focus: Pla
     ctx.strokeRect(x + wall.x * sx, y + wall.y * sy, wall.w * sx, wall.h * sy);
   });
 
-  // 检查是否需要显示敌人位置提示
-  if (state.showingHint[focus] && enemy.alive && myTank.alive) {
-    // 闪烁效果
-    const flash = Math.floor(state.frame / 10) % 2 === 0;
-    if (flash) {
-      ctx.fillStyle = enemy.color;
-      ctx.globalAlpha = 0.8;
-      ctx.beginPath();
-      ctx.arc(x + enemy.x * sx, y + enemy.y * sy, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      
-      // 添加外圈脉冲效果
-      const pulseSize = 10 + Math.sin(state.frame * 0.1) * 3;
-      ctx.strokeStyle = enemy.color;
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = 0.6;
-      ctx.beginPath();
-      ctx.arc(x + enemy.x * sx, y + enemy.y * sy, pulseSize, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+  // 检查是否显示敌人提示，对所有其他敌人
+  otherPlayers.forEach(enemyId => {
+    const enemy = state.tanks?.[enemyId];
+    if (!enemy) return;
+    if ((state.showingHint?.[focus] || false) && enemy.alive && myTank.alive) {
+      // 闪烁效果
+      const flash = Math.floor(state.frame / 10) % 2 === 0;
+      if (flash) {
+        ctx.fillStyle = enemy.color;
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        ctx.arc(x + enemy.x * sx, y + enemy.y * sy, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        
+        // 添加外圈脉冲效果
+        const pulseSize = 10 + Math.sin(state.frame * 0.1) * 3;
+        ctx.strokeStyle = enemy.color;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath();
+        ctx.arc(x + enemy.x * sx, y + enemy.y * sy, pulseSize, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
     }
-  }
+  });
 
   // 小地图不显示敌人坐标；只显示自己的定位点和已探索地形。
   if (myTank.alive) {
@@ -994,7 +1091,29 @@ function drawGame3D(
   }
 
   const { renderer, scene, camera } = three;
-  const me = state.tanks[focus];
+  
+  // 安全检查：确保 state 对象和所有属性都存在
+  if (!state) return;
+  
+  let me = state.tanks?.[focus];
+  
+  // 安全检查：如果坦克不存在，使用默认值
+  if (!me) {
+    me = {
+      id: focus,
+      x: W / 2,
+      y: H / 2,
+      angle: 0,
+      hp: 5,
+      score: 0,
+      alive: true,
+      cooldown: 0,
+      crashCooldown: 0,
+      color: "#ffcf33",
+      respawn: 0,
+      deathTime: 0
+    };
+  }
 
   // 清除上一帧添加的动态对象（保留静态的灯光、地面、网格）
   for (let i = scene.children.length - 1; i >= 0; i--) {
@@ -1016,7 +1135,7 @@ function drawGame3D(
   camera.position.copy(cameraPos);
   camera.lookAt(target.clone().add(forward.clone().multiplyScalar(110)).add(new THREE.Vector3(0, -18, 0)));
 
-  const explored = state.explored[focus];
+  const explored = state.explored?.[focus] || Array(FOG_COUNT).fill(false);
   const walls = generateWalls(state.mapSeed);
   const obstaclePalette = [0xffc857, 0x4dabf7, 0xff6b6b, 0x63e6be, 0xb197fc, 0xff922b, 0x94d82d];
 
@@ -1086,7 +1205,9 @@ function drawGame3D(
   });
 
   (Object.values(state.tanks) as Tank[]).forEach((t) => {
+    if (!t) return; // 安全检查
     if (!t.alive) return;
+    if (typeof t.x !== 'number' || typeof t.y !== 'number' || typeof t.angle !== 'number') return;
     if (t.id !== focus && !isCurrentlyVisible(me, t.x, t.y)) return;
     const tankMesh = makeTankMesh(tankStyles[t.id], t.color);
     tankMesh.position.copy(worldToThree(t.x, t.y, 0));
@@ -1094,7 +1215,7 @@ function drawGame3D(
     scene.add(tankMesh);
   });
 
-  state.bullets.forEach((b) => {
+  (state.bullets || []).forEach((b) => {
     if (b.owner !== focus && !isCurrentlyVisible(me, b.x, b.y)) return;
     const sphere = new THREE.Mesh(
       new THREE.SphereGeometry(6, 16, 10),
@@ -1104,10 +1225,10 @@ function drawGame3D(
     scene.add(sphere);
   });
 
-  state.explosions.forEach((e) => {
+  (state.explosions || []).forEach((e) => {
     // 即使自己死亡也能看到自己的爆炸特效
     const distance = Math.hypot(me.x - e.x, me.y - e.y);
-    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored[focus], e.x, e.y);
+    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored?.[focus], e.x, e.y);
     if (!visible) return;
     
     const radius = Math.max(10, 60 - e.t * 1.2); // 更大的爆炸
@@ -1128,10 +1249,10 @@ function drawGame3D(
   });
 
   // 渲染爆炸碎片
-  state.debris.forEach((d) => {
+  (state.debris || []).forEach((d) => {
     // 即使自己死亡也能看到自己的碎片
     const distance = Math.hypot(me.x - d.x, me.y - d.y);
-    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored[focus], d.x, d.y);
+    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored?.[focus], d.x, d.y);
     if (!visible) return;
     
     const opacity = Math.max(.1, d.t / 100);
@@ -1160,10 +1281,10 @@ function drawGame3D(
   });
 
   // 渲染路人NPC
-  state.pedestrians.forEach((ped) => {
+  (state.pedestrians || []).forEach((ped) => {
     // 检查路人是否可见（包括倒地状态）
     const distance = Math.hypot(me.x - ped.x, me.y - ped.y);
-    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored[focus], ped.x, ped.y);
+    const visible = distance <= REVEAL_RADIUS || isExplored(state.explored?.[focus], ped.x, ped.y);
     if (!visible) return;
     
     if (ped.alive) {
@@ -1341,29 +1462,38 @@ export default function Home({ targetSection }: HomeProps) {
   }, [targetSection]);
 
   const [role, setRole] = useState<Role>("menu");
-  const [peerId, setPeerId] = useState("");
+  const [roomCode, setRoomCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [status, setStatus] = useState("待机：选择主机或加入。");
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<GameState>(() => freshState());
   const [localInput, setLocalInput] = useState<PlayerInput>(EMPTY_INPUT);
-  const [tankStyles, setTankStyles] = useState<Record<PlayerId, TankStyleId>>({ p1: "vanguard", p2: "raptor" });
+  const [tankStyles, setTankStyles] = useState<Record<PlayerId, TankStyleId>>({ 
+    p1: "vanguard", 
+    p2: "raptor",
+    p3: "atlas",
+    p4: "specter" // 修复拼写：spectre -> specter
+  });
   const [helpOpen, setHelpOpen] = useState(false);
   const [shakeActive, setShakeActive] = useState(false);
   const [confettiBurst, setConfettiBurst] = useState(0);
-  const [musicPlaying, setMusicPlaying] = useState(true);
+  const [musicPlaying, setMusicPlaying] = useState(false);
   const [musicVolume, setMusicVolume] = useState(0.5);
   const [menuOpacity, setMenuOpacity] = useState(0.4); // 60%透明，更透明
   const [demoMode, setDemoMode] = useState(true);
   const [isSinglePlayer, setIsSinglePlayer] = useState(false); // 单机模式：AI作为2P
+  const [guestPlayerId, setGuestPlayerId] = useState<PlayerId>("p2"); // 客机的玩家ID
+  const [connectedPlayers, setConnectedPlayers] = useState<PlayerId[]>(["p1"]); // 显示在UI上的连接玩家
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hudRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<ThreeContext | null>(null);
-  const peerRef = useRef<Peer | null>(null);
-  const connRef = useRef<DataConnection | null>(null);
-  const remoteInputRef = useRef<PlayerInput>(EMPTY_INPUT);
+  const socketRef = useRef<any>(null);
+  // 支持多个玩家的输入（主机用）
+  const remoteInputsRef = useRef<Map<PlayerId, PlayerInput>>(new Map());
+  const connectedPlayersRef = useRef<PlayerId[]>(["p1"]);
   const localInputRef = useRef<PlayerInput>(EMPTY_INPUT);
   const stateRef = useRef<GameState>(state);
+  const roomCodeRef = useRef<string>(""); // 解决闭包问题！
   const fireLockRef = useRef(false);
   const lastHpRef = useRef<number | null>(null);
   const lastEnemyAliveRef = useRef<boolean | null>(null);
@@ -1374,8 +1504,10 @@ export default function Home({ targetSection }: HomeProps) {
   const lastPedestriansAliveRef = useRef<Map<string, boolean>>(new Map());
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const playerId: PlayerId = role === "guest" ? "p2" : "p1";
-  const enemyId: PlayerId = playerId === "p1" ? "p2" : "p1";
+  const playerId: PlayerId = role === "guest" ? guestPlayerId : "p1";
+  // 对于敌人，现在有多个敌人，但为了兼容性，我们保持这个变量指向第一个敌人
+  const activePlayers: PlayerId[] = Object.keys(state.tanks) as PlayerId[];
+  const enemyId: PlayerId = activePlayers.find(id => id !== playerId) ?? "p2";
   const hold = useHoldInput(setLocalInput);
 
   useEffect(() => { localInputRef.current = localInput; }, [localInput]);
@@ -1415,7 +1547,7 @@ export default function Home({ targetSection }: HomeProps) {
   // 初始化lastPedestriansAliveRef
   useEffect(() => {
     const aliveMap = new Map<string, boolean>();
-    state.pedestrians.forEach(ped => {
+    (state.pedestrians || []).forEach(ped => {
       aliveMap.set(ped.id, ped.alive);
     });
     lastPedestriansAliveRef.current = aliveMap;
@@ -1427,7 +1559,7 @@ export default function Home({ targetSection }: HomeProps) {
     
     // 检查有哪些NPC刚刚死亡（之前活着，现在死了）
     let hasDeath = false;
-    state.pedestrians.forEach(ped => {
+    (state.pedestrians || []).forEach(ped => {
       const wasAlive = lastPedestriansAliveRef.current.get(ped.id);
       if (wasAlive === true && !ped.alive) {
         hasDeath = true;
@@ -1443,7 +1575,7 @@ export default function Home({ targetSection }: HomeProps) {
     
     // 更新上一帧的状态
     const newAliveMap = new Map<string, boolean>();
-    state.pedestrians.forEach(ped => {
+    (state.pedestrians || []).forEach(ped => {
       newAliveMap.set(ped.id, ped.alive);
     });
     lastPedestriansAliveRef.current = newAliveMap;
@@ -1547,69 +1679,60 @@ export default function Home({ targetSection }: HomeProps) {
   useEffect(() => {
     if (!demoMode || role !== "menu") return;
     
-    // 保持当前方向的计时器
-    let currentDir1 = { up: true, down: false, left: false, right: false };
-    let currentDir2 = { up: false, down: true, left: false, right: false };
-    let dirTimer1 = 0;
-    let dirTimer2 = 0;
+    // 为所有坦克保持当前方向的计时器
+    const currentDirs: Record<PlayerId, { up: boolean; down: boolean; left: boolean; right: boolean }> = {
+      p1: { up: true, down: false, left: false, right: false },
+      p2: { up: false, down: true, left: false, right: false },
+      p3: { up: false, down: false, left: true, right: false },
+      p4: { up: false, down: false, left: false, right: true }
+    };
+    const dirTimers: Record<PlayerId, number> = {
+      p1: 0,
+      p2: 0,
+      p3: 0,
+      p4: 0
+    };
     const changeDirEvery = 60; // 每60帧（约1秒）才考虑改变方向
     
     const demoTick = window.setInterval(() => {
       setState((prev) => {
-        // 更新计时器
-        dirTimer1++;
-        dirTimer2++;
+        const inputs: Record<PlayerId, PlayerInput> = {} as any;
         
-        // 坦克1：保持方向，偶尔改变
-        if (dirTimer1 >= changeDirEvery) {
-          dirTimer1 = 0;
-          const rand = Math.random();
-          if (rand < 0.3) {
-            currentDir1 = { up: true, down: false, left: false, right: false };
-          } else if (rand < 0.5) {
-            currentDir1 = { up: false, down: true, left: false, right: false };
-          } else if (rand < 0.7) {
-            currentDir1 = { up: false, down: false, left: true, right: false };
-          } else {
-            currentDir1 = { up: false, down: false, left: false, right: true };
+        // 确定活跃玩家
+        const activePlayers: PlayerId[] = Object.keys(prev.tanks) as PlayerId[];
+        
+        activePlayers.forEach(playerId => {
+          dirTimers[playerId]++;
+          
+          if (dirTimers[playerId] >= changeDirEvery) {
+            dirTimers[playerId] = 0;
+            const rand = Math.random();
+            if (rand < 0.25) {
+              currentDirs[playerId] = { up: true, down: false, left: false, right: false };
+            } else if (rand < 0.5) {
+              currentDirs[playerId] = { up: false, down: true, left: false, right: false };
+            } else if (rand < 0.75) {
+              currentDirs[playerId] = { up: false, down: false, left: true, right: false };
+            } else {
+              currentDirs[playerId] = { up: false, down: false, left: false, right: true };
+            }
           }
-        }
-        
-        // 坦克2：保持方向，偶尔改变
-        if (dirTimer2 >= changeDirEvery) {
-          dirTimer2 = 0;
-          const rand = Math.random();
-          if (rand < 0.3) {
-            currentDir2 = { up: false, down: true, left: false, right: false };
-          } else if (rand < 0.5) {
-            currentDir2 = { up: true, down: false, left: false, right: false };
-          } else if (rand < 0.7) {
-            currentDir2 = { up: false, down: false, left: false, right: true };
-          } else {
-            currentDir2 = { up: false, down: false, left: true, right: false };
-          }
-        }
-        
-        const demoInput1: PlayerInput = {
-          ...currentDir1,
-          fire: Math.random() > 0.98, // 更低频率的射击
-          suicide: false
-        };
-        
-        const demoInput2: PlayerInput = {
-          ...currentDir2,
-          fire: Math.random() > 0.98,
-          suicide: false
-        };
+          
+          inputs[playerId] = {
+            ...currentDirs[playerId],
+            fire: Math.random() > 0.98,
+            suicide: false
+          };
+        });
         
         // 自动开始游戏如果还没开始
         if (prev.phase !== "playing" && Math.random() > 0.995) {
-          const newState = freshState();
+          const newState = freshState(true); // 启用所有4个玩家
           newState.phase = "playing";
           return newState;
         }
         
-        return stepGame(prev, { p1: demoInput1, p2: demoInput2 });
+        return stepGame(prev, inputs);
       });
     }, 1000 / 60);
     
@@ -1641,38 +1764,83 @@ export default function Home({ targetSection }: HomeProps) {
     return () => { window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); };
   }, [hold]);
 
-  // 单机模式AI控制ref
-  const aiDir1Ref = useRef<{ up: boolean; down: boolean; left: boolean; right: boolean }>({ up: false, down: false, left: false, right: false });
-  const aiDir2Ref = useRef<{ up: boolean; down: boolean; left: boolean; right: boolean }>({ up: true, down: false, left: false, right: false });
-  const aiFrameCount1Ref = useRef(0);
-  const aiFrameCount2Ref = useRef(0);
+  // 单机模式AI控制多个玩家的ref
+  const aiDirsRef = useRef<Record<PlayerId, { up: boolean; down: boolean; left: boolean; right: boolean }>>({
+    p1: { up: false, down: false, left: false, right: false },
+    p2: { up: false, down: false, left: false, right: false },
+    p3: { up: false, down: false, left: false, right: false },
+    p4: { up: false, down: false, left: false, right: false }
+  });
+  const aiFrameCountsRef = useRef<Record<PlayerId, number>>({
+    p1: 0,
+    p2: 0,
+    p3: 0,
+    p4: 0
+  });
 
   useEffect(() => {
     if (role !== "host" && !isSinglePlayer) return;
+    let frameCount = 0;
     const tick = window.setInterval(() => {
       setState((prev) => {
-        let p2Input = remoteInputRef.current;
+        const inputs: Record<PlayerId, PlayerInput> = {} as any;
         
-        // 如果是单机模式，AI控制p2
+        // 确定活跃玩家
+        let activePlayers: PlayerId[];
         if (isSinglePlayer) {
-          aiFrameCount2Ref.current++;
-          
-          if (aiFrameCount2Ref.current >= 60) {
-            aiFrameCount2Ref.current = 0;
-            const dirs = ["up", "down", "left", "right"] as const;
-            const newDir = dirs[Math.floor(Math.random() * dirs.length)];
-            aiDir2Ref.current = { up: false, down: false, left: false, right: false, [newDir]: true };
-          }
-          
-          p2Input = {
-            ...aiDir2Ref.current,
-            fire: Math.random() > 0.98,
-            suicide: false
-          };
+          activePlayers = ALL_PLAYERS;
+        } else {
+          // 联机模式：p1 加上所有已连接的客机
+          // connectedPlayersRef.current 已经是数组了，直接使用！
+          activePlayers = connectedPlayersRef.current;
         }
         
-        const next = stepGame(prev, { p1: localInputRef.current, p2: p2Input });
-        if (connRef.current?.open) connRef.current.send({ type: "state", state: next } satisfies Message);
+        // 本地玩家使用本地输入
+        inputs.p1 = localInputRef.current;
+        
+        // 如果是单机模式，AI控制所有其他玩家
+        if (isSinglePlayer) {
+          activePlayers.forEach(playerId => {
+            if (playerId === "p1") return; // 第一个玩家是玩家
+            aiFrameCountsRef.current[playerId]++;
+            
+            if (aiFrameCountsRef.current[playerId] >= 60) {
+              aiFrameCountsRef.current[playerId] = 0;
+              const dirs = ["up", "down", "left", "right"] as const;
+              const newDir = dirs[Math.floor(Math.random() * dirs.length)];
+              aiDirsRef.current[playerId] = { up: false, down: false, left: false, right: false, [newDir]: true };
+            }
+            
+            inputs[playerId] = {
+              ...aiDirsRef.current[playerId],
+              fire: Math.random() > 0.98,
+              suicide: false
+            };
+          });
+        } else {
+          // 联机模式：从 remoteInputsRef 获取所有远程玩家输入
+          activePlayers.forEach(playerId => {
+            if (playerId === "p1") return; // p1 是本地
+            // 如果有远程输入就用，没有就用默认输入
+            const remoteInput = remoteInputsRef.current.get(playerId);
+            inputs[playerId] = remoteInput || { ...EMPTY_INPUT };
+          });
+        }
+        
+        const next = stepGame(prev, inputs);
+        
+        // 降低状态同步频率，每 4 帧才同步一次（约 15 FPS），平衡流畅度和带宽
+        frameCount++;
+        if (role === "host" && !isSinglePlayer && frameCount % 4 === 0) {
+          // 向所有连接发送游戏状态
+          const currentRoomCode = roomCodeRef.current;
+          try {
+            socketRef.current?.emit('gameState', { roomCode: currentRoomCode, state: next });
+          } catch (e) {
+            console.error("❌ 发送状态失败:", e);
+          }
+        }
+        
         return next;
       });
     }, 1000 / 60);
@@ -1680,10 +1848,18 @@ export default function Home({ targetSection }: HomeProps) {
   }, [role, isSinglePlayer]);
 
   useEffect(() => {
-    if (role === "guest" && connRef.current?.open) {
-      connRef.current.send({ type: "input", input: localInput } satisfies Message);
-    }
-  }, [localInput, role]);
+    if (role !== "guest") return;
+    const tick = window.setInterval(() => {
+      if (socketRef.current?.connected) {
+        try {
+          socketRef.current.emit('playerInput', { roomCode, playerId: guestPlayerId, input: localInput });
+        } catch (e) {
+          console.error("发送输入失败:", e);
+        }
+      }
+    }, 1000 / 30); // 30 FPS 的输入更新
+    return () => window.clearInterval(tick);
+  }, [localInput, role, guestPlayerId, roomCode]);
 
   useEffect(() => {
     const myHp = state.tanks[playerId]?.hp;
@@ -1716,134 +1892,335 @@ export default function Home({ targetSection }: HomeProps) {
 
   const exitSession = useCallback(() => {
     console.log("🚪 退出房间");
-    connRef.current?.close();
-    connRef.current = null;
-    peerRef.current?.destroy();
-    peerRef.current = null;
-    remoteInputRef.current = EMPTY_INPUT;
+    // 断开 socket 连接
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    remoteInputsRef.current.clear();
+    connectedPlayersRef.current = ["p1"];
     localInputRef.current = EMPTY_INPUT;
     setLocalInput(EMPTY_INPUT);
     setConnected(false);
-    setPeerId("");
+    setRoomCode("");
     setJoinCode("");
     setRole("menu");
     setIsSinglePlayer(false);
+    setGuestPlayerId("p2"); // 重置客机玩家ID
     setStatus("待机：选择主机或加入。");
     setState(freshState());
     toast("已退出房间");
   }, []);
 
-  const attachConnection = useCallback((conn: DataConnection, mode: Role) => {
-    console.log("🔗 开始建立连接，模式:", mode);
-    connRef.current = conn;
-    conn.on("open", () => {
-      console.log("✅ 数据通道已打开！");
+  const createHost = useCallback(() => {
+    console.log("🎯 创建主机...");
+    setRole("host");
+    setIsSinglePlayer(false);
+    setDemoMode(false);
+    setStatus("连接服务器中...");
+    
+    // 连接到 socket.io 服务器
+    const socket = io(SERVER_URL);
+    socketRef.current = socket;
+    
+    socket.on('connect', () => {
+      console.log("✅ 已连接到服务器");
+      socket.emit('createRoom');
+    });
+    
+    socket.on('roomCreated', ({ roomCode: code, playerId }) => {
+      console.log("✅ 房间创建成功:", code);
+      setRoomCode(code);
+      roomCodeRef.current = code; // 更新 ref！
       setConnected(true);
-      setStatus(mode === "host" ? "2P 已接入，按“开战”开始。" : "已接入主机，等待主机开战。");
-      conn.send({ type: "join" } satisfies Message);
-      toast.success("数据通道已连接");
+      setStatus("主机已开启，把房间码发给其他玩家。");
+      toast.success("房间已创建！");
     });
-    conn.on("data", (raw) => {
-      console.log("📨 收到数据:", raw);
-      const msg = raw as Message;
-      if (msg.type === "input") remoteInputRef.current = msg.input;
-      if (msg.type === "state") setState(msg.state);
-      if (msg.type === "restart" && mode === "host") {
-        const ns = freshState(); ns.phase = "playing"; setState(ns);
-      }
+    
+    socket.on('playerListUpdated', ({ players }) => {
+      console.log("👥 玩家列表更新:", players);
+      // 提取玩家 ID 列表 (p1, p2, p3, p4)
+      const newConnectedPlayers = players.map((p: string) => {
+        if (p.includes("主机")) return "p1";
+        return p.toLowerCase() as PlayerId;
+      });
+      
+      connectedPlayersRef.current = newConnectedPlayers;
+      setConnectedPlayers(newConnectedPlayers);
+      
+      // 初始化所有玩家的默认输入，防止 undefined 问题！
+      const allPlayerIds = connectedPlayersRef.current;
+      allPlayerIds.forEach(playerId => {
+        if (playerId !== "p1" && !remoteInputsRef.current.has(playerId)) {
+          console.log("🎮 初始化玩家输入:", playerId);
+          remoteInputsRef.current.set(playerId, { ...EMPTY_INPUT });
+        }
+      });
+      
+      setStatus(`${players.join("、")} 已接入，按“开战”开始。`);
+      
+      // 更新状态
+      const enableAllPlayers = connectedPlayersRef.current.length >= 2;
+      setState((prev) => {
+        if (prev.phase === "playing") {
+          return prev;
+        }
+        return freshState(enableAllPlayers);
+      });
     });
-    conn.on("error", (err) => {
-      console.error("❌ 数据通道错误:", err);
-      toast.error("数据通道错误");
+    
+    socket.on('remotePlayerInput', ({ playerId: pid, input }) => {
+      remoteInputsRef.current.set(pid, input);
     });
-    conn.on("close", () => { 
-      console.log("🔌 数据通道已关闭");
-      setConnected(false);
-      // 当连接断开时，所有玩家都退出房间
-      setTimeout(() => {
-        exitSession();
-      }, 500);
+    
+    socket.on('playerLeft', ({ playerId, players }) => {
+      console.log("👋 玩家离开:", playerId);
+      remoteInputsRef.current.delete(playerId);
+      
+      const newConnectedPlayers = players.map((p: string) => {
+        if (p.includes("主机")) return "p1";
+        return p.toLowerCase() as PlayerId;
+      });
+      
+      connectedPlayersRef.current = newConnectedPlayers;
+      setConnectedPlayers(newConnectedPlayers);
+      
+      const enableAllPlayers = connectedPlayersRef.current.length >= 2;
+      setStatus(`${players.join("、")} 已接入，按“开战”开始。`);
+      toast.warning(`玩家 ${playerId.toUpperCase()} 已离开`);
+      
+      // 更新状态
+      setState((prev) => {
+        if (prev.phase === "playing") {
+          return prev;
+        }
+        return freshState(enableAllPlayers);
+      });
+    });
+    
+    socket.on('hostLeft', () => {
+      console.log("⚠️ 主机离开");
+      toast.error("主机已离开");
+      exitSession();
+    });
+    
+    socket.on('disconnect', () => {
+      console.log("🔌 与服务器断开连接");
+    });
+    
+    socket.on('error', (err) => {
+      console.error("❌ Socket 错误:", err);
+      toast.error("连接服务器失败");
     });
   }, [exitSession]);
 
-  const createHost = () => {
-    const id = roomCode();
-    const peer = new Peer(id, { 
-      debug: 2,
-      ...PEER_CONFIG
+  const joinHost = useCallback(() => {
+    if (!joinCode.trim()) {
+      toast.error("请输入房间码");
+      return;
+    }
+    
+    console.log("🔗 加入房间:", joinCode);
+    setStatus("连接服务器中...");
+    
+    const socket = io(SERVER_URL);
+    socketRef.current = socket;
+    
+    socket.on('connect', () => {
+      console.log("✅ 已连接到服务器");
+      socket.emit('joinRoom', joinCode.trim().toUpperCase());
+      setRole("guest");
+      setDemoMode(false);
+      setIsSinglePlayer(false);
     });
-    peerRef.current = peer;
-    setRole("host"); setPeerId(id); setStatus("正在启动主机信标……");
-    peer.on("open", (openId) => {
-      console.log("✅ 主机 ID 已分配:", openId, "配置:", PEER_CONFIG);
-      setStatus("主机已开启，把房间码发给 2P。");
+    
+    socket.on('joinedRoom', ({ roomCode: code, playerId }) => {
+      console.log("✅ 成功加入房间，分配玩家ID:", playerId);
+      setRoomCode(code);
+      setGuestPlayerId(playerId);
+      setConnected(true);
+      setStatus("已接入主机，等待主机开战。");
+      toast.success(`成功加入！你是玩家 ${playerId.toUpperCase()}`);
     });
-    peer.on("connection", (conn) => {
-      console.log("✅ 收到连接请求:", conn);
-      attachConnection(conn, "host");
+    
+    socket.on('roomNotFound', () => {
+      toast.error("房间不存在");
+      socket.disconnect();
     });
-    peer.on("error", (err) => { 
-      console.error("❌ 主机错误:", err);
-      setStatus(`主机错误：${err.type}`); 
-      toast.error("主机启动失败，请查看控制台错误信息"); 
+    
+    socket.on('roomFull', () => {
+      toast.error("房间已满");
+      socket.disconnect();
     });
-  };
+    
+    socket.on('roomAlreadyStarted', () => {
+      toast.error("游戏已开始");
+      socket.disconnect();
+    });
+    
+    socket.on('gameStarted', () => {
+      // 不要在这里修改 state，而是等待 gameStateUpdated 事件！
+    });
+    
+    socket.on('gameStateUpdated', (newState) => {
+      try {
+        setState(newState);
+      } catch (e) {
+        console.error("❌ 应用游戏状态失败:", e);
+      }
+    });
+    
+    socket.on('gameRestarted', () => {
+      setState((prev) => {
+        const newState = freshState(connectedPlayersRef.current.length >= 2);
+        newState.phase = "playing";
+        return newState;
+      });
+    });
+    
+    socket.on('playerListUpdated', ({ players }) => {
+      console.log("👥 玩家列表更新:", players);
+      // 提取玩家 ID 列表 (p1, p2, p3, p4)
+      const newConnectedPlayers = players.map((p: string) => {
+        if (p.includes("主机")) return "p1";
+        return p.toLowerCase() as PlayerId;
+      });
+      
+      connectedPlayersRef.current = newConnectedPlayers;
+      setConnectedPlayers(newConnectedPlayers);
+      
+      setStatus(`${players.join("、")} 已接入，等待主机开战。`);
+    });
+    
+    socket.on('playerLeft', ({ playerId, players }) => {
+      console.log("👋 玩家离开:", playerId);
+      
+      // 提取玩家 ID 列表
+      const newConnectedPlayers = players.map((p: string) => {
+        if (p.includes("主机")) return "p1";
+        return p.toLowerCase() as PlayerId;
+      });
+      
+      connectedPlayersRef.current = newConnectedPlayers;
+      setConnectedPlayers(newConnectedPlayers);
+      
+      setStatus(`${players.join("、")} 已接入，等待主机开战。`);
+      toast.warning(`玩家 ${playerId.toUpperCase()} 已离开`);
+    });
+    
+    socket.on('hostLeft', () => {
+      console.log("⚠️ 主机离开");
+      toast.error("主机已离开");
+      exitSession();
+    });
+    
+    socket.on('disconnect', () => {
+      console.log("🔌 与服务器断开连接");
+    });
+    
+    socket.on('error', (err) => {
+      console.error("❌ Socket 错误:", err);
+      toast.error("连接服务器失败");
+    });
+  }, [joinCode, exitSession]);
 
-  const joinHost = () => {
-    const code = joinCode.trim().toUpperCase();
-    if (!code) return toast.error("先输入房间码");
-    console.log("🚀 正在尝试加入房间:", code, "配置:", PEER_CONFIG);
-    const peer = new Peer({ 
-      debug: 2,
-      ...PEER_CONFIG
-    });
-    peerRef.current = peer;
-    setRole("guest"); setStatus("正在呼叫主机……");
-    peer.on("open", (openId) => {
-      console.log("✅ 客机 ID 已分配:", openId, "正在连接到主机:", code);
-      const conn = peer.connect(code, { reliable: true });
-      attachConnection(conn, "guest");
-    });
-    peer.on("error", (err) => { 
-      console.error("❌ 加入失败:", err);
-      setStatus(`加入失败：${err.type}`); 
-      toast.error("加入失败，请查看控制台错误信息"); 
-    });
-  };
-
-  const startGame = () => {
-    const ns = freshState(); ns.phase = "playing";
-    persistMapSeed(ns.mapSeed);
-    setState(ns);
-    connRef.current?.send({ type: "state", state: ns } satisfies Message);
-  };
+  const startGame = useCallback(() => {
+    if (role !== "host") return;
+    
+    // 直接使用连接玩家数组给 freshState
+    const activePlayers = connectedPlayersRef.current;
+    
+    // 先创建初始 state
+    const initialState = freshState(activePlayers);
+    initialState.phase = "playing";
+    
+    // 立即向所有客机发送这个初始 state
+    const currentRoomCode = roomCodeRef.current;
+    try {
+      socketRef.current?.emit('gameState', { roomCode: currentRoomCode, state: initialState });
+    } catch (e) {
+      console.error("❌ 发送初始状态失败:", e);
+    }
+    
+    // 然后本地设置 state
+    setState(initialState);
+    
+    // 通知服务器开始游戏
+    socketRef.current?.emit('startGame', currentRoomCode);
+  }, [role]);
 
   const startSinglePlayer = () => {
     setIsSinglePlayer(true);
     setDemoMode(false);
     setRole("host"); // 单机模式也用host逻辑
     setStatus("单机模式：开始对战AI！");
-    const ns = freshState();
+    const ns = freshState(true); // 启用所有4个玩家
     ns.phase = "playing";
     persistMapSeed(ns.mapSeed);
     setState(ns);
   };
 
   const restart = () => {
-    if (role === "host") startGame();
-    else connRef.current?.send({ type: "restart" } satisfies Message);
+    if (role === "host") {
+      if (isSinglePlayer) {
+        const ns = freshState(true);
+        ns.phase = "playing";
+        setState(ns);
+      } else {
+        socketRef.current?.emit('restartGame', roomCode);
+        const enableAllPlayers = connectedPlayersRef.current.length >= 2;
+        setState((prev) => {
+          const newState = freshState(enableAllPlayers);
+          newState.phase = "playing";
+          return newState;
+        });
+      }
+    } else {
+      // 客机：不发送重启请求，让主机控制
+      toast.info("请等待主机重新开始游戏");
+    }
   };
 
   const copyRoomCode = useCallback(async () => {
-    if (!peerId) return;
-    await navigator.clipboard?.writeText(peerId);
+    if (!roomCode) return;
+    await navigator.clipboard?.writeText(roomCode);
     toast.success("房间码已复制");
-  }, [peerId]);
+  }, [roomCode]);
 
   const menuVisible = role === "menu" || state.phase !== "playing";
   const showExit = role !== "menu";
-  const myTank = state.tanks[playerId];
-  const enemyTank = state.tanks[enemyId];
+  // 安全获取 myTank 和 enemyTank，避免 state.tanks 没有对应键的情况
+  const myTank = state.tanks[playerId] || {
+    id: playerId,
+    hp: 5,
+    score: 0,
+    alive: true,
+    x: 0,
+    y: 0,
+    angle: 0,
+    cooldown: 0,
+    crashCooldown: 0,
+    color: "#ffcf33",
+    respawn: 0,
+    deathTime: 0
+  };
+  // 找到第一个活着的敌人坦克
+  const activePlayerIds = Object.keys(state.tanks) as PlayerId[];
+  const firstEnemyId = activePlayerIds.find(id => id !== playerId) || playerId;
+  const enemyTank = state.tanks[firstEnemyId] || {
+    id: firstEnemyId,
+    hp: 5,
+    score: 0,
+    alive: true,
+    x: 0,
+    y: 0,
+    angle: 0,
+    cooldown: 0,
+    crashCooldown: 0,
+    color: "#36e0ff",
+    respawn: 0,
+    deathTime: 0
+  };
   const refreshCountdownActive = state.phase === "playing" && state.refreshTimer > 0 && state.refreshTimer <= MAP_REFRESH_WARNING_TICKS;
   const refreshSeconds = Math.ceil(state.refreshTimer / 60);
   const refreshFlash = state.refreshTimer % 24 < 12;
@@ -1939,7 +2316,28 @@ export default function Home({ targetSection }: HomeProps) {
                         <Badge className="rounded-none bg-[#ffcf33] text-black">MULTIPLAYER TANK</Badge>
                         <h1 className="mt-3 text-3xl font-black leading-none tracking-tight text-[#ffcf33] sm:text-4xl">多人坦克大战</h1>
                       </div>
-                      <Swords className="mt-1 h-9 w-9 shrink-0 text-[#36e0ff]" />
+                      <div className="flex items-center gap-2">
+                        {/* 音乐开关按钮 */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMusicPlaying(!musicPlaying);
+                          }}
+                          className="flex items-center justify-center border-2 border-[#ffcf33] bg-[#11150d] p-2 text-[#ffcf33] transition hover:bg-[#ffcf33] hover:text-black"
+                          title={musicPlaying ? "关闭音乐" : "开启音乐"}
+                        >
+                          {musicPlaying ? (
+                            <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071a1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243a1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828a1 1 0 010-1.415z" clipRule="evenodd" />
+                            </svg>
+                          ) : (
+                            <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v10c0 .891-1.077 1.337-1.707.707L5.586 15z" clipRule="evenodd" />
+                            </svg>
+                          )}
+                        </button>
+                        <Swords className="mt-1 h-9 w-9 shrink-0 text-[#36e0ff]" />
+                      </div>
                     </div>
 
                     <div className="mb-4 grid grid-cols-2 gap-2 text-sm">
@@ -1956,7 +2354,7 @@ export default function Home({ targetSection }: HomeProps) {
                         {role === "host" && !isSinglePlayer && (
                           <div className="mt-3 border border-dashed border-[#ffcf33]/40 p-3 text-center">
                             <div className="text-xs text-[#d8d2ad]">房间码</div>
-                            <button onClick={copyRoomCode} className="mt-1 text-3xl font-black tracking-wider text-[#ffcf33]">{peerId}</button>
+                            <button onClick={copyRoomCode} className="mt-1 text-3xl font-black tracking-wider text-[#ffcf33]">{roomCode}</button>
                             <button onClick={copyRoomCode} className="mx-auto mt-2 flex items-center gap-2 border border-[#ffcf33]/35 px-2 py-1 text-xs text-[#f6f0d0]">
                               <Copy className="h-3.5 w-3.5" />复制房间码
                             </button>
@@ -2016,6 +2414,50 @@ export default function Home({ targetSection }: HomeProps) {
                         })}
                       </div>
                     </div>
+
+                    {/* 玩家列表 */}
+                    {(role === "host" || role === "guest") && (
+                      <div className="mb-4 border-2 border-[#ffcf33]/45 bg-black/25 p-3">
+                        <div className="mb-3 flex items-center gap-2 text-sm font-black text-[#ffcf33]"><Gamepad2 className="h-4 w-4" />玩家列表</div>
+                        <div className="space-y-2">
+                          {ALL_PLAYERS.map((pid) => {
+                            const isConnected = connectedPlayers.includes(pid);
+                            const isHost = pid === "p1";
+                            const color = PLAYER_COLORS[pid];
+                            const displayId = pid.toUpperCase();
+                            
+                            return (
+                              <div 
+                                key={pid} 
+                                className={`flex items-center gap-3 border-2 p-2 transition ${isConnected ? "border-white/30 bg-white/10" : "border-white/10 bg-white/5 opacity-50"}`}
+                              >
+                                {/* 坦克颜色预览 */}
+                                <div className="flex gap-1">
+                                  <span className="h-4 w-6 border border-white/30" style={{ background: color }} />
+                                  <span className="h-4 w-3 border border-white/30" style={{ background: color, filter: 'brightness(0.6)' }} />
+                                </div>
+                                
+                                {/* 玩家ID和状态 */}
+                                <div className="flex-1">
+                                  <div className="text-xs font-black text-[#f6f0d0]">
+                                    {displayId} {isHost ? "(主机)" : ""}
+                                  </div>
+                                  <div className={`text-[10px] leading-4 ${isConnected ? "text-[#73ff8f]" : "text-[#888]"}`}>
+                                    {isConnected ? "已连接" : "等待中..."}
+                                  </div>
+                                </div>
+                                
+                                {/* 连接状态指示器 */}
+                                <div className={`h-3 w-3 rounded-full ${isConnected ? "bg-[#73ff8f] shadow-[0_0_8px_rgba(115,255,143,0.8)]" : "bg-[#545454]"}`} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-2 text-[10px] text-[#d8d2ad]/70">
+                          最多支持 4 人同时联机
+                        </div>
+                      </div>
+                    )}
 
                     <div className="flex flex-wrap gap-2">
                       {(role === "host" || isSinglePlayer) && (
