@@ -15,7 +15,3 @@ language = "nodejs"
 [packager.features]
 packageSearch = true
 
-# The ports to expose
-[ports]
-port = 3000
-
