@@ -1,0 +1,105 @@
+src/pages/Home.tsx
+  483f9bf3085dd66e 1495,1498-1502,1838,1840,1858-1859,1862-1880 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0eeeb6b7eca55075007a1f","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":1495},{"Range":[1498,1502]},{"Single":1838},{"Single":1840},{"Range":[1858,1859]},{"Range":[1862,1880]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "de66b5cbb589f766517ca85e43a1870ebd10ee8e",
+  "prompts": {
+    "483f9bf3085dd66e": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0c135db7eca55075006a3f",
+        "model": "Doubao-Seed-2.0-Code__dev"
+      },
+      "human_author": "xueduanyang <xueduanyang@bytedance.com>",
+      "messages": [],
+      "total_additions": 29,
+      "total_deletions": 6,
+      "accepted_lines": 29,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "src/pages/Home.tsx": [
+      {
+        "hash": "483f9bf3085dd66e",
+        "line_ranges": [
+          {
+            "Single": 1495
+          },
+          {
+            "Range": [
+              1498,
+              1502
+            ]
+          },
+          {
+            "Single": 1838
+          },
+          {
+            "Single": 1840
+          },
+          {
+            "Range": [
+              1858,
+              1859
+            ]
+          },
+          {
+            "Range": [
+              1862,
+              1880
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0eeeb6b7eca55075007a1f",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 1495
+              },
+              {
+                "Range": [
+                  1498,
+                  1502
+                ]
+              },
+              {
+                "Single": 1838
+              },
+              {
+                "Single": 1840
+              },
+              {
+                "Range": [
+                  1858,
+                  1859
+                ]
+              },
+              {
+                "Range": [
+                  1862,
+                  1880
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "483f9bf3085dd66e": {
+      "tool": "trae",
+      "conversation_id": "6a0c135db7eca55075006a3f",
+      "session_id": "6a0c135db7eca55075006a3f",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
