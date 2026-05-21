@@ -1492,8 +1492,14 @@ export default function Home({ targetSection }: HomeProps) {
   const remoteInputsRef = useRef<Map<PlayerId, PlayerInput>>(new Map());
   const connectedPlayersRef = useRef<PlayerId[]>(["p1"]);
   const localInputRef = useRef<PlayerInput>(EMPTY_INPUT);
+  const lastInputSentRef = useRef<PlayerInput>(EMPTY_INPUT);
   const stateRef = useRef<GameState>(state);
   const roomCodeRef = useRef<string>(""); // 解决闭包问题！
+  
+  // 客户端预测/插值状态
+  const predictedStateRef = useRef<GameState | null>(null);
+  const lastReceivedStateRef = useRef<GameState | null>(null);
+  const interpolationAlphaRef = useRef(0);
   const fireLockRef = useRef(false);
   const lastHpRef = useRef<number | null>(null);
   const lastEnemyAliveRef = useRef<boolean | null>(null);
@@ -1829,9 +1835,9 @@ export default function Home({ targetSection }: HomeProps) {
         
         const next = stepGame(prev, inputs);
         
-        // 降低状态同步频率，每 4 帧才同步一次（约 15 FPS），平衡流畅度和带宽
+        // 降低状态同步频率，每 6 帧才同步一次（约 10 FPS），减少网络流量
         frameCount++;
-        if (role === "host" && !isSinglePlayer && frameCount % 4 === 0) {
+        if (role === "host" && !isSinglePlayer && frameCount % 6 === 0) {
           // 向所有连接发送游戏状态
           const currentRoomCode = roomCodeRef.current;
           try {
@@ -1849,12 +1855,29 @@ export default function Home({ targetSection }: HomeProps) {
 
   useEffect(() => {
     if (role !== "guest") return;
+    
+    let frameCount = 0;
     const tick = window.setInterval(() => {
       if (socketRef.current?.connected) {
-        try {
-          socketRef.current.emit('playerInput', { roomCode, playerId: guestPlayerId, input: localInput });
-        } catch (e) {
-          console.error("发送输入失败:", e);
+        frameCount++;
+        
+        // 检查输入是否变化
+        const inputChanged = 
+          localInput.up !== lastInputSentRef.current.up ||
+          localInput.down !== lastInputSentRef.current.down ||
+          localInput.left !== lastInputSentRef.current.left ||
+          localInput.right !== lastInputSentRef.current.right ||
+          localInput.fire !== lastInputSentRef.current.fire ||
+          localInput.suicide !== lastInputSentRef.current.suicide;
+        
+        // 只有输入变化时发送，或者每 10 帧发送一次心跳
+        if (inputChanged || frameCount % 10 === 0) {
+          try {
+            socketRef.current.emit('playerInput', { roomCode, playerId: guestPlayerId, input: localInput });
+            lastInputSentRef.current = { ...localInput };
+          } catch (e) {
+            console.error("发送输入失败:", e);
+          }
         }
       }
     }, 1000 / 30); // 30 FPS 的输入更新
